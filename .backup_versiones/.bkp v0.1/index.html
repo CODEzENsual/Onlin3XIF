@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy Inspector</title>
+    <link rel="stylesheet" href="fonts/fonts.css">
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" integrity="sha512-Zcn6GRVDLweO+e3A84vW5z5Ocg04A33iX2k52A1b8TE2Bq0O3D1wI1w1w==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+</head>
+<body>
+    <div class="theme-toggle">
+        <button id="themeBtn" class="icon-btn" aria-label="Toggle theme">
+            <span class="material-symbols-rounded" id="themeIcon">dark_mode</span>
+        </button>
+    </div>
+
+    <div class="app-container">
+        <header class="app-header">
+            <h1 class="app-title">Privacy Inspector</h1>
+            <p class="app-subtitle">Technical metadata analysis and removal tool.</p>
+        </header>
+
+        <main class="inspector-card" id="mainCard">
+            <!-- Upload Area -->
+            <div class="upload-zone" id="dropZone">
+                <input type="file" id="fileInput" accept="image/jpeg, image/png, image/webp, image/heic, image/tiff, image/gif">
+                <div class="upload-content">
+                    <div class="upload-icon-wrapper">
+                        <span class="material-symbols-rounded upload-icon-main">description</span>
+                        <span class="material-symbols-rounded upload-icon-shield">shield</span>
+                    </div>
+                    <h2 class="upload-title">Drop file to inspect</h2>
+                    <p class="upload-subtitle">or click to browse</p>
+                </div>
+            </div>
+
+            <!-- Inspection Panel (Hidden initially) -->
+            <div class="inspection-panel" id="inspectionPanel" style="display: none;">
+                
+                <!-- Header: Preview & Status -->
+                <div class="panel-header">
+                    <div class="preview-wrapper">
+                        <img id="filePreview" alt="File preview">
+                    </div>
+                    <div class="status-wrapper">
+                        <h3 id="fileNameDisplay" class="file-name-display">filename.jpg</h3>
+                        <div class="status-indicator" id="privacyStatus">
+                            <span class="material-symbols-rounded status-icon">pending</span>
+                            <span class="status-text">Analyzing...</span>
+                        </div>
+                        <div class="action-wrapper">
+                            <button id="btnClean" class="btn-primary">
+                                <span class="material-symbols-rounded">cleaning_services</span>
+                                Clean Metadata
+                            </button>
+                            <div id="cleaningProgress" class="cleaning-progress" style="display: none;">
+                                <div class="progress-bar">
+                                    <div class="progress-fill"></div>
+                                </div>
+                                <span class="progress-text">Sanitizing file...</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sections Container -->
+                <div class="sections-container">
+                    
+                    <!-- Section: Identidad del archivo -->
+                    <details class="inspector-section" open>
+                        <summary class="section-header">
+                            <span class="material-symbols-rounded">badge</span>
+                            Identidad del archivo
+                            <span class="material-symbols-rounded expand-icon">expand_more</span>
+                        </summary>
+                        <div class="section-content data-grid" id="identityGrid"></div>
+                    </details>
+
+                    <!-- Section: Estructura del archivo -->
+                    <details class="inspector-section" open>
+                        <summary class="section-header">
+                            <span class="material-symbols-rounded">architecture</span>
+                            Estructura del archivo
+                            <span class="material-symbols-rounded expand-icon">expand_more</span>
+                        </summary>
+                        <div class="section-content data-grid" id="structureGrid"></div>
+                    </details>
+
+                    <!-- Section: Geolocalización -->
+                    <details class="inspector-section" id="geoSection" style="display: none;" open>
+                        <summary class="section-header">
+                            <span class="material-symbols-rounded">location_on</span>
+                            Geolocalización
+                            <span class="material-symbols-rounded expand-icon">expand_more</span>
+                        </summary>
+                        <div class="section-content">
+                            <div id="mapContainer" style="height: 250px; width: 100%; border-radius: 12px; margin-bottom: 16px; display: none; z-index: 1;"></div>
+                            <div class="data-grid" id="geoGrid"></div>
+                        </div>
+                    </details>
+
+                    <!-- Section: Metadata EXIF completa -->
+                    <details class="inspector-section" id="exifSection" style="display: none;" open>
+                        <summary class="section-header">
+                            <span class="material-symbols-rounded">camera</span>
+                            Metadata EXIF completa
+                            <span class="material-symbols-rounded expand-icon">expand_more</span>
+                        </summary>
+                        <div class="section-content data-grid" id="exifGrid"></div>
+                    </details>
+
+                    <!-- Section: Metadata extendida -->
+                    <details class="inspector-section" id="extendedSection" style="display: none;" open>
+                        <summary class="section-header">
+                            <span class="material-symbols-rounded">extension</span>
+                            Metadata extendida (XMP/IPTC/ICC)
+                            <span class="material-symbols-rounded expand-icon">expand_more</span>
+                        </summary>
+                        <div class="section-content data-grid" id="extendedGrid"></div>
+                    </details>
+
+                    <!-- Section: Vista cruda de metadata -->
+                    <details class="inspector-section" id="rawSection" style="display: none;">
+                        <summary class="section-header">
+                            <span class="material-symbols-rounded">data_object</span>
+                            Vista cruda de metadata
+                            <span class="material-symbols-rounded expand-icon">expand_more</span>
+                        </summary>
+                        <div class="section-content raw-view" id="rawGrid"></div>
+                    </details>
+
+                    <div class="no-data-msg" id="noMetadataMsg" style="display: none;">
+                        <span class="material-symbols-rounded">check_circle</span>
+                        No metadata detected
+                    </div>
+                </div>
+
+                <!-- Final Result Area -->
+                <div class="result-section" id="resultSection" style="display: none;">
+                    <div class="result-card">
+                        <div class="result-header">
+                            <span class="material-symbols-rounded result-icon">verified_user</span>
+                            <div class="result-text">
+                                <h4>Clean file available</h4>
+                                <p>All technical metadata has been removed.</p>
+                            </div>
+                        </div>
+                        <div class="result-stats" id="resultStats">
+                            <!-- Populated by JS -->
+                        </div>
+                        <div class="action-group" style="display: flex; gap: 12px; margin-top: 8px;">
+                            <button id="btnDownload" class="btn-success" style="flex: 1;">
+                                <span class="material-symbols-rounded">download</span>
+                                Download Safe File
+                            </button>
+                            <button id="btnExport" class="btn-primary" style="flex: 1;">
+                                <span class="material-symbols-rounded">data_object</span>
+                                Export JSON
+                            </button>
+                            <button id="btnExportCSV" class="btn-primary" style="flex: 1;">
+                                <span class="material-symbols-rounded">table_view</span>
+                                Export CSV
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <!-- Local library -->
+    <script src="lib/exif-reader.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js" integrity="sha512-BwHfrr4z9O5OwwT5ky7CVZ0O/0108k068ngB18nE401Xb1z1w1w1w1w1w1w1w1w1w1w1w1w1w1w1w1w1w1w==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="app.js"></script>
+</body>
+</html>
