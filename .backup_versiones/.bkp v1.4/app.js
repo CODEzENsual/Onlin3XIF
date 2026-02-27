@@ -360,10 +360,6 @@ function isValidCreditCard(value) {
     const digits = normalizeDigits(value);
     if (digits.length < 13 || digits.length > 19) return false;
     if (/^(\d)\1+$/.test(digits)) return false;
-    
-    // Check valid IIN/BIN prefixes (Visa: 4, Mastercard: 5, Amex: 3, Discover: 6)
-    if (!/^[3456]/.test(digits)) return false;
-    
     return luhnCheck(digits);
 }
 
@@ -797,16 +793,9 @@ async function handleFile(file) {
             contentSection.style.display = 'block';
         };
 
-        const analyzeSensitiveText = (rawText, contextKey = '') => {
+        const analyzeSensitiveText = (rawText) => {
             if (!rawText || typeof rawText !== 'string') return;
-            
-            const isDateOrTime = /time|date|year|month|day|hour|minute|second/i.test(contextKey);
-            
             for (const [label, patternData] of Object.entries(REGEX_PATTERNS)) {
-                if (isDateOrTime && (label === 'CreditCard' || label === 'IMEI' || label === 'IMSI' || label === 'Phone')) {
-                    continue;
-                }
-                
                 const regex = new RegExp(patternData.regex.source, patternData.regex.flags);
                 for (const match of rawText.matchAll(regex)) {
                     const candidate = (patternData.useCaptureGroup ? match[1] : match[0]) || '';
@@ -847,7 +836,7 @@ async function handleFile(file) {
                             const val = tag.description || tag.value;
                             extractedTags[`EXIF:${key}`] = val;
                             totalTags++;
-                            analyzeSensitiveText(String(val || ''), key);
+                            analyzeSensitiveText(String(val || ''));
                             
                             const isSens = SENSITIVE_KEYS.some(k => key.includes(k));
                             const isWarn = WARNING_KEYS.some(k => key.includes(k));
@@ -871,7 +860,7 @@ async function handleFile(file) {
                             const val = tag.description || tag.value;
                             extractedTags[`GPS:${key}`] = val;
                             totalTags++;
-                            analyzeSensitiveText(String(val || ''), key);
+                            analyzeSensitiveText(String(val || ''));
                             score -= 1.5;
                             addInfoRow(geoGrid, key, val, 'sensitive', true, `GPS:${key}`);
                         }
@@ -886,7 +875,7 @@ async function handleFile(file) {
                                 const val = tag.description || tag.value;
                                 extractedTags[`${type.toUpperCase()}:${key}`] = val;
                                 totalTags++;
-                                analyzeSensitiveText(String(val || ''), key);
+                                analyzeSensitiveText(String(val || ''));
                                 addInfoRow(extendedGrid, `[${type.toUpperCase()}] ${key}`, val, '', true, `${type.toUpperCase()}:${key}`);
                             }
                         }
@@ -913,7 +902,7 @@ async function handleFile(file) {
                             if (val && typeof val === 'string' && val.trim() !== '') {
                                 extractedTags[`PDF:${key}`] = val;
                                 totalTags++;
-                                analyzeSensitiveText(val, key);
+                                analyzeSensitiveText(val);
                                 
                                 let valClass = '';
                                 if (key.toLowerCase().includes('author') || key.toLowerCase().includes('creator')) {
@@ -956,7 +945,7 @@ async function handleFile(file) {
                                 docxMeta[key] = val;
                                 extractedTags[`DOCX:${key}`] = val;
                                 totalTags++;
-                                analyzeSensitiveText(val, key);
+                                analyzeSensitiveText(val);
                                 
                                 let valClass = '';
                                 if (key.toLowerCase().includes('creator') || key.toLowerCase().includes('lastmodifiedby')) {
