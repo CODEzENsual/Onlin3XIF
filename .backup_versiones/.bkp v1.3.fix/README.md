@@ -19,8 +19,6 @@ Este visor es 100 % local y ofrece un conjunto muy completo de herramientas pa
 - **Compatibilidad móvil** y diseño responsivo con animaciones ligeras.
 - **Offline y sin servidor**: todo el código corre en el cliente; se puede servir desde GitHub Pages.
 
-El repositorio está listo para desplegar en GitHub Pages sin configuración adicional.
-
 ## 🛠️ Tecnologías
 
 - HTML5, CSS3 (Variables, Flex/Grid, Backdrop-filter)

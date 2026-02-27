@@ -123,12 +123,28 @@ window.addEventListener('pageshow', scheduleUnlock, { passive: true });
 document.addEventListener('keydown', (event) => {
     if (event.key === 'PrintScreen' || event.code === 'PrintScreen') {
         setScreenLocked(true);
+        // Limpiar portapapeles si es posible
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText('');
+        }
     }
 }, true);
 
+// Bloquear captura de pantalla
 if (navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function') {
     navigator.mediaDevices.getDisplayMedia = () => Promise.reject(new DOMException('Screen capture blocked', 'NotAllowedError'));
 }
+
+// Bloquear salir de la página
+window.addEventListener('beforeunload', (e) => {
+    setScreenLocked(true);
+    e.preventDefault();
+    e.returnValue = '';
+});
+
+// Prevenir menú contextual y arrastre
+document.addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('dragstart', e => e.preventDefault());
 
 enforceScreenLock();
 
@@ -1087,25 +1103,39 @@ btnClean.addEventListener('click', async () => {
     }, 100);
     
     try {
-        const img = new Image();
-        img.src = URL.createObjectURL(currentFile);
+        const isJpeg = currentFile.type === 'image/jpeg' || currentFile.type === 'image/jpg';
         
-        await new Promise((resolve, reject) => {
-            img.onload = resolve;
-            img.onerror = () => reject(new Error("No se pudo cargar la imagen para limpiar"));
-        });
-        
-        const canvas = document.createElement('canvas');
-        canvas.width = img.width;
-        canvas.height = img.height;
-        
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0);
-        
-        const type = currentFile.type || 'image/jpeg';
-        const quality = 0.95;
-        
-        canvas.toBlob(async (blob) => {
+        if (isJpeg) {
+            // Usar piexif para limpiar JPEG de forma segura sin perder calidad
+            const reader = new FileReader();
+            reader.readAsDataURL(currentFile);
+            
+            await new Promise((resolve, reject) => {
+                reader.onload = resolve;
+                reader.onerror = reject;
+            });
+            
+            let jpegData = reader.result;
+            
+            // Crear un objeto EXIF vacío
+            const emptyExif = {"0th":{}, "Exif":{}, "GPS":{}, "Interop":{}, "1st":{}, "thumbnail":null};
+            const exifBytes = piexif.dump(emptyExif);
+            
+            // Insertar EXIF vacío
+            let newJpegData = piexif.insert(exifBytes, jpegData);
+            
+            // Eliminar otros segmentos (XMP, IPTC, ICC)
+            newJpegData = removeJpegSegments(newJpegData, true, true, true);
+            
+            // Convertir base64 de vuelta a blob
+            const byteString = atob(newJpegData.split(',')[1]);
+            const ab = new ArrayBuffer(byteString.length);
+            const ia = new Uint8Array(ab);
+            for (let i = 0; i < byteString.length; i++) {
+                ia[i] = byteString.charCodeAt(i);
+            }
+            const blob = new Blob([ab], { type: 'image/jpeg' });
+            
             clearInterval(interval);
             progressFill.style.width = '100%';
             
@@ -1159,7 +1189,83 @@ btnClean.addEventListener('click', async () => {
                 
                 resultSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
             }, 400);
-        }, type, quality);
+            
+        } else {
+            // Fallback para otras imágenes usando Canvas
+            const img = new Image();
+            img.src = URL.createObjectURL(currentFile);
+            
+            await new Promise((resolve, reject) => {
+                img.onload = resolve;
+                img.onerror = () => reject(new Error("No se pudo cargar la imagen para limpiar"));
+            });
+            
+            const canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            
+            const type = currentFile.type || 'image/png';
+            const quality = 1.0; // Máxima calidad para no perder datos
+            
+            canvas.toBlob(async (blob) => {
+                clearInterval(interval);
+                progressFill.style.width = '100%';
+                
+                cleanHash = await calculateSHA512(blob);
+                const cleanHash256 = await calculateSHA256(blob);
+                const cleanHashMD5 = await calculateMD5(blob);
+                const cleanHashCRC32 = await calculateCRC32(blob);
+                
+                setTimeout(() => {
+                    cleanSize = blob.size;
+                    cleanBlobUrl = URL.createObjectURL(blob);
+                    
+                    cleaningProgress.style.display = 'none';
+                    setPrivacyStatus('success', 'verified_user', 'Metadata eliminada');
+                    
+                    resultSection.style.display = 'block';
+                    resultStats.innerHTML = `
+                        <div class="stat-item">
+                            <span class="stat-label">Original Size</span>
+                            <span class="stat-value strike">${formatBytes(originalSize)}</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Clean Size</span>
+                            <span class="stat-value new">${formatBytes(cleanSize)}</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Saved</span>
+                            <span class="stat-value">${formatBytes(originalSize - cleanSize)}</span>
+                        </div>
+                        <div class="stat-item" style="grid-column: 1 / -1; margin-top: 8px;">
+                            <span class="stat-label">Clean CRC32</span>
+                            <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHashCRC32}</span>
+                        </div>
+                        <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;">
+                            <span class="stat-label">Clean MD5</span>
+                            <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHashMD5}</span>
+                        </div>
+                        <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;">
+                            <span class="stat-label">Clean SHA-256</span>
+                            <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHash256}</span>
+                        </div>
+                        <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;">
+                            <span class="stat-label">Clean SHA-512</span>
+                            <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHash}</span>
+                        </div>
+                    `;
+                    
+                    const removedKeys = Object.keys(extractedTags);
+                    showDiffs(removedKeys);
+                    saveState(blob, removedKeys, 'full');
+                    
+                    resultSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                }, 400);
+            }, type, quality);
+        }
         
     } catch (error) {
         clearInterval(interval);
@@ -1190,10 +1296,15 @@ function removeJpegSegments(jpegData, removeXmp, removeIptc, removeIcc) {
         let keep = true;
         if (marker === 0xE1 && removeXmp) { // APP1
             if (segment.slice(4, 33) === "http://ns.adobe.com/xap/1.0/\x00") keep = false;
+            // También eliminar EXIF si se pide limpieza total (removeXmp, removeIptc, removeIcc = true)
+            if (removeXmp && removeIptc && removeIcc && segment.slice(4, 10) === "Exif\x00\x00") keep = false;
         } else if (marker === 0xED && removeIptc) { // APP13
             if (segment.slice(4, 18) === "Photoshop 3.0\x00") keep = false;
         } else if (marker === 0xE2 && removeIcc) { // APP2
             if (segment.slice(4, 16) === "ICC_PROFILE\x00") keep = false;
+        } else if (marker >= 0xE0 && marker <= 0xEF && removeXmp && removeIptc && removeIcc) {
+            // Si es limpieza total, eliminar todos los segmentos APP (excepto APP0 que suele ser JFIF necesario)
+            if (marker !== 0xE0) keep = false;
         }
         
         if (keep) newSegments.push(segment);
@@ -1294,6 +1405,17 @@ btnSelectiveClean.addEventListener('click', async () => {
                 removeIptc = true;
             } else if (type === 'ICC') {
                 removeIcc = true;
+            } else if (type === 'Raw') {
+                // Si es un tag Raw, intentamos eliminarlo de todos los IFDs
+                for (const ifd in exifObj) {
+                    if (exifObj[ifd] && typeof exifObj[ifd] === 'object') {
+                        for (const tagId in exifObj[ifd]) {
+                            if (piexif.TAGS[ifd] && piexif.TAGS[ifd][tagId] && piexif.TAGS[ifd][tagId].name === name) {
+                                delete exifObj[ifd][tagId];
+                            }
+                        }
+                    }
+                }
             }
         });
         

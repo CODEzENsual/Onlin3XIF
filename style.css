@@ -76,7 +76,7 @@ details[open] .section-content {
 .screen-lock-overlay{position:fixed;inset:0;z-index:99999;background:#000;display:none;align-items:center;justify-content:center;pointer-events:all}
 .screen-lock-title{color:#fff;font-size:clamp(1.5rem,3.8vw,2.4rem);font-weight:700;letter-spacing:.03em;text-transform:uppercase}
 body.screen-locked{overflow:hidden}
-body.screen-locked .app-container,body.screen-locked .theme-toggle{visibility:hidden}
+body.screen-locked .app-container,body.screen-locked .theme-toggle{visibility:hidden;opacity:0;pointer-events:none;user-select:none}
 body.screen-locked .screen-lock-overlay{display:flex}
 
 @media (max-width:600px){.panel-header{flex-direction:column;align-items:flex-start}.preview-wrapper{width:100%;height:200px}.data-row{flex-direction:column;gap:4px}.data-value{text-align:left;max-width:100%}.section-content{padding:0 16px 16px}}
