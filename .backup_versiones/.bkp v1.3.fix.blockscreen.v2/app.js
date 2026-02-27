@@ -550,13 +550,8 @@ function setPrivacyStatus(type, icon, text) {
     `;
 }
 
-function escapeRegex(str) {
-    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 function filterMetadata(query) {
     const q = query.toLowerCase().trim();
-    const escaped = q ? escapeRegex(q) : '';
     let totalMatches = 0;
     
     const sections = [
@@ -605,11 +600,11 @@ function filterMetadata(query) {
                 
                 // Highlight matches
                 if (labelMatch) {
-                    const regex = new RegExp(`(${escaped})`, 'gi');
+                    const regex = new RegExp(`(${q})`, 'gi');
                     labelEl.innerHTML = labelText.replace(regex, '<mark>$1</mark>');
                 }
                 if (valueMatch) {
-                    const regex = new RegExp(`(${escaped})`, 'gi');
+                    const regex = new RegExp(`(${q})`, 'gi');
                     valueEl.innerHTML = valueText.replace(regex, '<mark>$1</mark>');
                 }
             } else {
@@ -1111,41 +1106,51 @@ btnClean.addEventListener('click', async () => {
         const isJpeg = currentFile.type === 'image/jpeg' || currentFile.type === 'image/jpg';
         
         if (isJpeg) {
-            const arrayBuffer = await currentFile.arrayBuffer();
-            const cleanedData = stripAllJpegMetadata(arrayBuffer);
-            if (!cleanedData) throw new Error('Error procesando JPEG');
-
-            const verification = verifyCleanJpeg(cleanedData.buffer);
-            let finalData = cleanedData;
-            if (!verification.clean) {
-                const secondPass = stripAllJpegMetadata(finalData.buffer);
-                if (secondPass) finalData = secondPass;
+            // Usar piexif para limpiar JPEG de forma segura sin perder calidad
+            const reader = new FileReader();
+            reader.readAsDataURL(currentFile);
+            
+            await new Promise((resolve, reject) => {
+                reader.onload = resolve;
+                reader.onerror = reject;
+            });
+            
+            let jpegData = reader.result;
+            
+            // Crear un objeto EXIF vacío
+            const emptyExif = {"0th":{}, "Exif":{}, "GPS":{}, "Interop":{}, "1st":{}, "thumbnail":null};
+            const exifBytes = piexif.dump(emptyExif);
+            
+            // Insertar EXIF vacío
+            let newJpegData = piexif.insert(exifBytes, jpegData);
+            
+            // Eliminar otros segmentos (XMP, IPTC, ICC)
+            newJpegData = removeJpegSegments(newJpegData, true, true, true);
+            
+            // Convertir base64 de vuelta a blob
+            const byteString = atob(newJpegData.split(',')[1]);
+            const ab = new ArrayBuffer(byteString.length);
+            const ia = new Uint8Array(ab);
+            for (let i = 0; i < byteString.length; i++) {
+                ia[i] = byteString.charCodeAt(i);
             }
-
-            const blob = new Blob([finalData], { type: 'image/jpeg' });
-
+            const blob = new Blob([ab], { type: 'image/jpeg' });
+            
             clearInterval(interval);
             progressFill.style.width = '100%';
-
+            
             cleanHash = await calculateSHA512(blob);
             const cleanHash256 = await calculateSHA256(blob);
             const cleanHashMD5 = await calculateMD5(blob);
             const cleanHashCRC32 = await calculateCRC32(blob);
-
-            const finalVerification = verifyCleanJpeg(finalData.buffer);
-
+            
             setTimeout(() => {
                 cleanSize = blob.size;
                 cleanBlobUrl = URL.createObjectURL(blob);
-
+                
                 cleaningProgress.style.display = 'none';
-
-                if (finalVerification.clean) {
-                    setPrivacyStatus('success', 'verified_user', 'Metadata eliminada y verificada ✔');
-                } else {
-                    setPrivacyStatus('warning', 'gpp_maybe', `Limpieza parcial: quedan ${finalVerification.remaining.join(', ')}`);
-                }
-
+                setPrivacyStatus('success', 'verified_user', 'Metadata eliminada');
+                
                 resultSection.style.display = 'block';
                 resultStats.innerHTML = `
                     <div class="stat-item">
@@ -1159,10 +1164,6 @@ btnClean.addEventListener('click', async () => {
                     <div class="stat-item">
                         <span class="stat-label">Saved</span>
                         <span class="stat-value">${formatBytes(originalSize - cleanSize)}</span>
-                    </div>
-                    <div class="stat-item" style="grid-column: 1 / -1; margin-top: 8px;">
-                        <span class="stat-label">Verificación</span>
-                        <span class="stat-value ${finalVerification.clean ? 'new' : 'sensitive'}">${finalVerification.clean ? 'LIMPIO ✔' : 'Restos: ' + finalVerification.remaining.join(', ')}</span>
                     </div>
                     <div class="stat-item" style="grid-column: 1 / -1; margin-top: 8px;">
                         <span class="stat-label">Clean CRC32</span>
@@ -1181,11 +1182,11 @@ btnClean.addEventListener('click', async () => {
                         <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHash}</span>
                     </div>
                 `;
-
+                
                 const removedKeys = Object.keys(extractedTags);
                 showDiffs(removedKeys);
                 saveState(blob, removedKeys, 'full');
-
+                
                 resultSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
             }, 400);
             
@@ -1276,115 +1277,41 @@ btnClean.addEventListener('click', async () => {
     }
 });
 
-function readUint16BE(data, offset) {
-    return (data[offset] << 8) | data[offset + 1];
-}
-
-function matchBytes(data, offset, str) {
-    for (let i = 0; i < str.length; i++) {
-        if (offset + i >= data.length) return false;
-        if (data[offset + i] !== str.charCodeAt(i)) return false;
-    }
-    return true;
-}
-
-function parseJpegMarkers(data) {
-    const markers = [];
-    if (data.length < 2 || data[0] !== 0xFF || data[1] !== 0xD8) return null;
-    markers.push({ marker: 0xD8, start: 0, end: 2 });
-    let offset = 2;
-    while (offset < data.length - 1) {
-        if (data[offset] !== 0xFF) break;
-        while (offset < data.length - 1 && data[offset + 1] === 0xFF) offset++;
-        const marker = data[offset + 1];
-        if (marker === 0xDA) {
-            markers.push({ marker, start: offset, end: data.length });
+function removeJpegSegments(jpegData, removeXmp, removeIptc, removeIcc) {
+    const byteString = atob(jpegData.split(',')[1]);
+    let offset = 2; // Skip FF D8
+    let newSegments = [byteString.slice(0, 2)];
+    
+    while (offset < byteString.length) {
+        if (byteString.charCodeAt(offset) !== 0xFF) break;
+        const marker = byteString.charCodeAt(offset + 1);
+        if (marker === 0xDA || marker === 0xD9) { // SOS or EOI
+            newSegments.push(byteString.slice(offset));
             break;
         }
-        if (marker === 0xD9) {
-            markers.push({ marker, start: offset, end: offset + 2 });
-            break;
+        
+        const length = (byteString.charCodeAt(offset + 2) << 8) | byteString.charCodeAt(offset + 3);
+        const segment = byteString.slice(offset, offset + 2 + length);
+        
+        let keep = true;
+        if (marker === 0xE1 && removeXmp) { // APP1
+            if (segment.slice(4, 33) === "http://ns.adobe.com/xap/1.0/\x00") keep = false;
+            // También eliminar EXIF si se pide limpieza total (removeXmp, removeIptc, removeIcc = true)
+            if (removeXmp && removeIptc && removeIcc && segment.slice(4, 10) === "Exif\x00\x00") keep = false;
+        } else if (marker === 0xED && removeIptc) { // APP13
+            if (segment.slice(4, 18) === "Photoshop 3.0\x00") keep = false;
+        } else if (marker === 0xE2 && removeIcc) { // APP2
+            if (segment.slice(4, 16) === "ICC_PROFILE\x00") keep = false;
+        } else if (marker >= 0xE0 && marker <= 0xEF && removeXmp && removeIptc && removeIcc) {
+            // Si es limpieza total, eliminar todos los segmentos APP (excepto APP0 que suele ser JFIF necesario)
+            if (marker !== 0xE0) keep = false;
         }
-        if (offset + 3 >= data.length) break;
-        const segLen = readUint16BE(data, offset + 2);
-        const segEnd = offset + 2 + segLen;
-        if (segEnd > data.length) break;
-        markers.push({ marker, start: offset, end: segEnd });
-        offset = segEnd;
+        
+        if (keep) newSegments.push(segment);
+        offset += 2 + length;
     }
-    return markers;
-}
-
-function stripAllJpegMetadata(arrayBuffer) {
-    const data = new Uint8Array(arrayBuffer);
-    const markers = parseJpegMarkers(data);
-    if (!markers) return null;
-    const keep = markers.filter(seg => {
-        if (seg.marker === 0xD8) return true;
-        if (seg.marker === 0xE0) return true;
-        if (seg.marker >= 0xE1 && seg.marker <= 0xEF) return false;
-        if (seg.marker === 0xFE) return false;
-        return true;
-    });
-    let total = 0;
-    keep.forEach(s => total += (s.end - s.start));
-    const result = new Uint8Array(total);
-    let pos = 0;
-    keep.forEach(s => {
-        result.set(data.subarray(s.start, s.end), pos);
-        pos += (s.end - s.start);
-    });
-    return result;
-}
-
-function stripJpegSegments(arrayBuffer, removeExif, removeXmp, removeIptc, removeIcc) {
-    const data = new Uint8Array(arrayBuffer);
-    const markers = parseJpegMarkers(data);
-    if (!markers) return null;
-    const keep = markers.filter(seg => {
-        if (seg.marker === 0xE1) {
-            const sd = data.subarray(seg.start, seg.end);
-            if (removeExif && sd.length >= 10 && matchBytes(sd, 4, "Exif\x00\x00")) return false;
-            if (removeXmp && sd.length >= 33 && matchBytes(sd, 4, "http://ns.adobe.com/xap/1.0/\x00")) return false;
-        }
-        if (seg.marker === 0xED && removeIptc) {
-            const sd = data.subarray(seg.start, seg.end);
-            if (sd.length >= 18 && matchBytes(sd, 4, "Photoshop 3.0\x00")) return false;
-        }
-        if (seg.marker === 0xE2 && removeIcc) {
-            const sd = data.subarray(seg.start, seg.end);
-            if (sd.length >= 16 && matchBytes(sd, 4, "ICC_PROFILE\x00")) return false;
-        }
-        return true;
-    });
-    let total = 0;
-    keep.forEach(s => total += (s.end - s.start));
-    const result = new Uint8Array(total);
-    let pos = 0;
-    keep.forEach(s => {
-        result.set(data.subarray(s.start, s.end), pos);
-        pos += (s.end - s.start);
-    });
-    return result;
-}
-
-function verifyCleanJpeg(arrayBuffer) {
-    const data = new Uint8Array(arrayBuffer);
-    const markers = parseJpegMarkers(data);
-    if (!markers) return { clean: false, remaining: ['Error parsing JPEG'] };
-    const remaining = [];
-    markers.forEach(seg => {
-        if (seg.marker >= 0xE1 && seg.marker <= 0xEF) {
-            const sd = data.subarray(seg.start, seg.end);
-            if (seg.marker === 0xE1 && sd.length >= 10 && matchBytes(sd, 4, "Exif\x00\x00")) remaining.push('EXIF');
-            else if (seg.marker === 0xE1 && sd.length >= 33 && matchBytes(sd, 4, "http://ns.adobe.com/xap/1.0/\x00")) remaining.push('XMP');
-            else if (seg.marker === 0xED && sd.length >= 18 && matchBytes(sd, 4, "Photoshop 3.0\x00")) remaining.push('IPTC');
-            else if (seg.marker === 0xE2 && sd.length >= 16 && matchBytes(sd, 4, "ICC_PROFILE\x00")) remaining.push('ICC');
-            else remaining.push(`APP${seg.marker - 0xE0}`);
-        }
-        if (seg.marker === 0xFE) remaining.push('Comment');
-    });
-    return { clean: remaining.length === 0, remaining };
+    
+    return "data:image/jpeg;base64," + btoa(newSegments.join(""));
 }
 
 btnSelectiveClean.addEventListener('click', async () => {
@@ -1414,220 +1341,147 @@ btnSelectiveClean.addEventListener('click', async () => {
     }, 100);
     
     try {
-        const arrayBuffer = await currentFile.arrayBuffer();
-
+        const reader = new FileReader();
+        reader.readAsDataURL(currentFile);
+        
+        await new Promise((resolve, reject) => {
+            reader.onload = resolve;
+            reader.onerror = reject;
+        });
+        
+        let jpegData = reader.result;
+        
+        // Load EXIF data
+        let exifObj;
+        try {
+            exifObj = piexif.load(jpegData);
+        } catch (e) {
+            exifObj = {"0th":{}, "Exif":{}, "GPS":{}, "Interop":{}, "1st":{}, "thumbnail":null};
+        }
+        
+        // Build reverse map for piexif tags
         const nameToTag = {};
-        const ifdMap = { 'Image': '0th', '0th': '0th', 'Exif': 'Exif', 'GPS': 'GPS', '1st': '1st', 'Interop': 'Interop' };
         for (const ifd in piexif.TAGS) {
-            const targetIfd = ifdMap[ifd] || ifd;
-            for (const tagId in piexif.TAGS[ifd]) {
-                const tagName = piexif.TAGS[ifd][tagId].name;
-                nameToTag[tagName] = { ifd: targetIfd, id: parseInt(tagId) };
+            if (ifd === 'Image' || ifd === '0th') {
+                for (const tagId in piexif.TAGS[ifd]) {
+                    nameToTag[piexif.TAGS[ifd][tagId].name] = { ifd: '0th', id: parseInt(tagId) };
+                }
+            } else if (ifd === 'Exif') {
+                for (const tagId in piexif.TAGS[ifd]) {
+                    nameToTag[piexif.TAGS[ifd][tagId].name] = { ifd: 'Exif', id: parseInt(tagId) };
+                }
+            } else if (ifd === 'GPS') {
+                for (const tagId in piexif.TAGS[ifd]) {
+                    nameToTag[piexif.TAGS[ifd][tagId].name] = { ifd: 'GPS', id: parseInt(tagId) };
+                }
+            } else if (ifd === '1st') {
+                for (const tagId in piexif.TAGS[ifd]) {
+                    nameToTag[piexif.TAGS[ifd][tagId].name] = { ifd: '1st', id: parseInt(tagId) };
+                }
             }
         }
-
-        let removeExif = false;
+        
+        // Remove selected tags
         let removeXmp = false;
         let removeIptc = false;
         let removeIcc = false;
-        let removeAllGps = false;
         const removedKeys = [];
-        const selectedExifNames = [];
-        const selectedGpsNames = [];
-
+        
         checkboxes.forEach(cb => {
-            const fullKey = cb.dataset.key;
-            const colonIdx = fullKey.indexOf(':');
-            const type = fullKey.substring(0, colonIdx);
-            const name = fullKey.substring(colonIdx + 1);
-            removedKeys.push(fullKey);
-
-            if (type === 'GPS') {
-                selectedGpsNames.push(name);
-            } else if (type === 'EXIF') {
-                selectedExifNames.push(name);
+            const keyParts = cb.dataset.key.split(':');
+            const type = keyParts[0];
+            const name = keyParts[1];
+            
+            removedKeys.push(cb.dataset.key);
+            
+            if (type === 'EXIF' || type === 'GPS') {
+                const tagInfo = nameToTag[name];
+                if (tagInfo && exifObj[tagInfo.ifd] && exifObj[tagInfo.ifd][tagInfo.id] !== undefined) {
+                    delete exifObj[tagInfo.ifd][tagInfo.id];
+                }
             } else if (type === 'XMP') {
                 removeXmp = true;
             } else if (type === 'IPTC') {
                 removeIptc = true;
             } else if (type === 'ICC') {
                 removeIcc = true;
+            } else if (type === 'Raw') {
+                // Si es un tag Raw, intentamos eliminarlo de todos los IFDs
+                for (const ifd in exifObj) {
+                    if (exifObj[ifd] && typeof exifObj[ifd] === 'object') {
+                        for (const tagId in exifObj[ifd]) {
+                            if (piexif.TAGS[ifd] && piexif.TAGS[ifd][tagId] && piexif.TAGS[ifd][tagId].name === name) {
+                                delete exifObj[ifd][tagId];
+                            }
+                        }
+                    }
+                }
             }
         });
-
-        const allGpsChecked = geoGrid.querySelectorAll('.remove-checkbox').length > 0 &&
-            geoGrid.querySelectorAll('.remove-checkbox').length === geoGrid.querySelectorAll('.remove-checkbox:checked').length;
-        const allExifChecked = exifGrid.querySelectorAll('.remove-checkbox').length > 0 &&
-            exifGrid.querySelectorAll('.remove-checkbox').length === exifGrid.querySelectorAll('.remove-checkbox:checked').length;
-        const allExtChecked = extendedGrid.querySelectorAll('.remove-checkbox').length > 0 &&
-            extendedGrid.querySelectorAll('.remove-checkbox').length === extendedGrid.querySelectorAll('.remove-checkbox:checked').length;
-
-        if (allGpsChecked && allExifChecked && allExtChecked) {
-            const cleanedData = stripAllJpegMetadata(arrayBuffer);
-            if (!cleanedData) throw new Error('Error procesando JPEG');
-            const blob = new Blob([cleanedData], { type: 'image/jpeg' });
-
-            clearInterval(interval);
-            progressFill.style.width = '100%';
-
-            cleanHash = await calculateSHA512(blob);
-            const cleanHash256 = await calculateSHA256(blob);
-            const cleanHashMD5 = await calculateMD5(blob);
-            const cleanHashCRC32 = await calculateCRC32(blob);
-            const finalVerification = verifyCleanJpeg(cleanedData.buffer);
-
-            setTimeout(() => {
-                cleanSize = blob.size;
-                cleanBlobUrl = URL.createObjectURL(blob);
-                cleaningProgress.style.display = 'none';
-                if (finalVerification.clean) {
-                    setPrivacyStatus('success', 'verified_user', 'Toda la metadata eliminada y verificada ✔');
-                } else {
-                    setPrivacyStatus('warning', 'gpp_maybe', `Quedan: ${finalVerification.remaining.join(', ')}`);
-                }
-                resultSection.style.display = 'block';
-                resultStats.innerHTML = `
-                    <div class="stat-item"><span class="stat-label">Original Size</span><span class="stat-value strike">${formatBytes(originalSize)}</span></div>
-                    <div class="stat-item"><span class="stat-label">Clean Size</span><span class="stat-value new">${formatBytes(cleanSize)}</span></div>
-                    <div class="stat-item"><span class="stat-label">Saved</span><span class="stat-value">${formatBytes(originalSize - cleanSize)}</span></div>
-                    <div class="stat-item" style="grid-column: 1 / -1; margin-top: 8px;"><span class="stat-label">Verificación</span><span class="stat-value ${finalVerification.clean ? 'new' : 'sensitive'}">${finalVerification.clean ? 'LIMPIO ✔' : 'Restos: ' + finalVerification.remaining.join(', ')}</span></div>
-                    <div class="stat-item" style="grid-column: 1 / -1; margin-top: 8px;"><span class="stat-label">Clean CRC32</span><span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHashCRC32}</span></div>
-                    <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;"><span class="stat-label">Clean MD5</span><span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHashMD5}</span></div>
-                    <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;"><span class="stat-label">Clean SHA-256</span><span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHash256}</span></div>
-                    <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;"><span class="stat-label">Clean SHA-512</span><span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHash}</span></div>
-                `;
-                showDiffs(removedKeys);
-                saveState(blob, removedKeys, 'selective');
-                resultSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-            }, 400);
-
-            return;
+        
+        // Dump and insert back
+        const exifBytes = piexif.dump(exifObj);
+        let newJpegData = piexif.insert(exifBytes, jpegData);
+        
+        // Remove other segments if requested
+        if (removeXmp || removeIptc || removeIcc) {
+            newJpegData = removeJpegSegments(newJpegData, removeXmp, removeIptc, removeIcc);
         }
-
-        let workingBuffer = arrayBuffer;
-
-        if (allGpsChecked) {
-            removeAllGps = true;
+        
+        // Convert base64 back to blob
+        const byteString = atob(newJpegData.split(',')[1]);
+        const ab = new ArrayBuffer(byteString.length);
+        const ia = new Uint8Array(ab);
+        for (let i = 0; i < byteString.length; i++) {
+            ia[i] = byteString.charCodeAt(i);
         }
-
-        const needsPiexif = selectedExifNames.length > 0 || selectedGpsNames.length > 0;
-
-        if (needsPiexif && !allGpsChecked && !allExifChecked) {
-            const reader = new FileReader();
-            reader.readAsDataURL(currentFile);
-            await new Promise((resolve, reject) => {
-                reader.onload = resolve;
-                reader.onerror = reject;
-            });
-            let jpegData = reader.result;
-
-            let exifObj;
-            try {
-                exifObj = piexif.load(jpegData);
-            } catch (e) {
-                exifObj = {"0th":{}, "Exif":{}, "GPS":{}, "Interop":{}, "1st":{}, "thumbnail":null};
-            }
-
-            selectedExifNames.forEach(name => {
-                let tagInfo = nameToTag[name];
-                if (tagInfo && exifObj[tagInfo.ifd] && exifObj[tagInfo.ifd][tagInfo.id] !== undefined) {
-                    delete exifObj[tagInfo.ifd][tagInfo.id];
-                } else {
-                    for (const ifd of ['0th', 'Exif', '1st']) {
-                        if (!exifObj[ifd]) continue;
-                        for (const tid in exifObj[ifd]) {
-                            const tInfo = piexif.TAGS[ifd === '0th' ? 'Image' : ifd];
-                            if (tInfo && tInfo[tid] && tInfo[tid].name === name) {
-                                delete exifObj[ifd][tid];
-                            }
-                        }
-                    }
-                }
-            });
-
-            selectedGpsNames.forEach(name => {
-                let tagInfo = nameToTag[name] || nameToTag[`GPS${name}`] || nameToTag[`GPS${name}Ref`];
-                if (tagInfo && exifObj[tagInfo.ifd] && exifObj[tagInfo.ifd][tagInfo.id] !== undefined) {
-                    delete exifObj[tagInfo.ifd][tagInfo.id];
-                } else {
-                    if (exifObj.GPS) {
-                        for (const tid in exifObj.GPS) {
-                            const tInfo = piexif.TAGS.GPS;
-                            if (tInfo && tInfo[tid]) {
-                                const tn = tInfo[tid].name;
-                                if (tn === name || tn === `GPS${name}` || tn.replace(/^GPS/, '') === name) {
-                                    delete exifObj.GPS[tid];
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-
-            try {
-                const exifBytes = piexif.dump(exifObj);
-                jpegData = piexif.insert(exifBytes, jpegData);
-            } catch (e) {
-                jpegData = piexif.remove(jpegData);
-            }
-
-            const b64 = jpegData.split(',')[1];
-            const raw = atob(b64);
-            const buf = new Uint8Array(raw.length);
-            for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
-            workingBuffer = buf.buffer;
-        }
-
-        if (allGpsChecked || allExifChecked) {
-            removeExif = true;
-        }
-
-        if (removeExif || removeXmp || removeIptc || removeIcc) {
-            const stripped = stripJpegSegments(workingBuffer, removeExif, removeXmp, removeIptc, removeIcc);
-            if (stripped) workingBuffer = stripped.buffer;
-        }
-
-        if (allExtChecked) {
-            removeXmp = true;
-            removeIptc = true;
-            removeIcc = true;
-            const stripped2 = stripJpegSegments(workingBuffer, false, true, true, true);
-            if (stripped2) workingBuffer = stripped2.buffer;
-        }
-
-        const blob = new Blob([new Uint8Array(workingBuffer)], { type: 'image/jpeg' });
-
+        const blob = new Blob([ab], { type: 'image/jpeg' });
+        
         clearInterval(interval);
         progressFill.style.width = '100%';
-
+        
         cleanHash = await calculateSHA512(blob);
         const cleanHash256 = await calculateSHA256(blob);
         const cleanHashMD5 = await calculateMD5(blob);
         const cleanHashCRC32 = await calculateCRC32(blob);
-        const selectiveVerification = verifyCleanJpeg(workingBuffer);
-
+        
         setTimeout(() => {
             cleanSize = blob.size;
             cleanBlobUrl = URL.createObjectURL(blob);
 
             cleaningProgress.style.display = 'none';
-
-            if (selectiveVerification.remaining.length === 0 && (removeExif || allExifChecked)) {
-                setPrivacyStatus('success', 'verified_user', 'Metadata seleccionada eliminada y verificada ✔');
-            } else {
-                setPrivacyStatus('success', 'verified_user', 'Metadata seleccionada eliminada');
-            }
-
+            setPrivacyStatus('success', 'verified_user', 'Metadata seleccionada eliminada');
+            
             resultSection.style.display = 'block';
             resultStats.innerHTML = `
-                <div class="stat-item"><span class="stat-label">Original Size</span><span class="stat-value strike">${formatBytes(originalSize)}</span></div>
-                <div class="stat-item"><span class="stat-label">Clean Size</span><span class="stat-value new">${formatBytes(cleanSize)}</span></div>
-                <div class="stat-item"><span class="stat-label">Saved</span><span class="stat-value">${formatBytes(originalSize - cleanSize)}</span></div>
-                <div class="stat-item" style="grid-column: 1 / -1; margin-top: 8px;"><span class="stat-label">Verificación</span><span class="stat-value ${selectiveVerification.remaining.length === 0 ? 'new' : ''}">${selectiveVerification.remaining.length === 0 ? 'Sin EXIF/XMP/IPTC/ICC residual ✔' : 'Segmentos restantes: ' + selectiveVerification.remaining.join(', ')}</span></div>
-                <div class="stat-item" style="grid-column: 1 / -1; margin-top: 8px;"><span class="stat-label">Clean CRC32</span><span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHashCRC32}</span></div>
-                <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;"><span class="stat-label">Clean MD5</span><span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHashMD5}</span></div>
-                <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;"><span class="stat-label">Clean SHA-256</span><span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHash256}</span></div>
-                <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;"><span class="stat-label">Clean SHA-512</span><span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHash}</span></div>
+                <div class="stat-item">
+                    <span class="stat-label">Original Size</span>
+                    <span class="stat-value strike">${formatBytes(originalSize)}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Clean Size</span>
+                    <span class="stat-value new">${formatBytes(cleanSize)}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Saved</span>
+                    <span class="stat-value">${formatBytes(originalSize - cleanSize)}</span>
+                </div>
+                <div class="stat-item" style="grid-column: 1 / -1; margin-top: 8px;">
+                    <span class="stat-label">Clean CRC32</span>
+                    <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHashCRC32}</span>
+                </div>
+                <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;">
+                    <span class="stat-label">Clean MD5</span>
+                    <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHashMD5}</span>
+                </div>
+                <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;">
+                    <span class="stat-label">Clean SHA-256</span>
+                    <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHash256}</span>
+                </div>
+                <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;">
+                    <span class="stat-label">Clean SHA-512</span>
+                    <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHash}</span>
+                </div>
             `;
 
             showDiffs(removedKeys);
