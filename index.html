@@ -3,18 +3,49 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#2563eb">
+    <link rel="manifest" href="manifest.json">
     <meta http-equiv="Permissions-Policy" content="display-capture=()">
+    <meta name="description" content="Privacy Inspector: Analiza metadatos y contenido sensible de forma local, rápida y segura en tus archivos (fotos, videos, documentos).">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests;">
     <title>Privacy Inspector</title>
+    <link rel="preload" href="fonts/fonts.css" as="style">
     <link rel="stylesheet" href="fonts/fonts.css">
+    <link rel="preload" href="style.css" as="style">
     <link rel="stylesheet" href="style.css">
+    <script>
+        const savedTheme = localStorage.getItem('theme') || 'light';
+        document.documentElement.setAttribute('data-theme', savedTheme);
+    </script>
+    
+    <!-- Local libraries deferred for performance -->
+    <script src="lib/exif-reader.min.js" defer></script>
+    <script src="lib/piexif.js" defer></script>
+    <script src="lib/pdf.min.js" defer></script>
+    <script src="lib/jszip.min.js" defer></script>
+    <script src="lib/crypto-js.min.js" defer></script>
+    <script src="app.js" defer></script>
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./sw.js').catch(err => {
+                    console.log('Error asignando ServiceWorker:', err);
+                });
+            });
+        }
+    </script>
 </head>
 <body>
-    <div id="screenLockOverlay" class="screen-lock-overlay" aria-live="assertive" role="status" style="display: none;">
-        <span class="screen-lock-title">Pantalla Bloqueada</span>
+    <div id="screenLockOverlay" class="screen-lock-overlay" aria-live="assertive" role="status" aria-hidden="true" style="display: none;">
+        <div class="screen-lock-card">
+            <span class="material-symbols-rounded screen-lock-icon">shield_lock</span>
+            <span class="screen-lock-title">Pantalla protegida</span>
+            <p class="screen-lock-text">El contenido queda oculto mientras la ventana no está activa.</p>
+        </div>
     </div>
 
     <div class="theme-toggle">
-        <button id="themeBtn" class="icon-btn" aria-label="Toggle theme">
+        <button id="themeBtn" class="icon-btn" aria-label="Cambiar tema">
             <span class="material-symbols-rounded" id="themeIcon">dark_mode</span>
         </button>
     </div>
@@ -22,20 +53,20 @@
     <div class="app-container">
         <header class="app-header">
             <h1 class="app-title">Privacy Inspector</h1>
-            <p class="app-subtitle">Technical metadata analysis and removal tool.</p>
+            <p class="app-subtitle">Analiza metadatos y contenido sensible de forma local, rápida y segura.</p>
         </header>
 
         <main class="inspector-card" id="mainCard">
             <!-- Upload Area -->
             <div class="upload-zone" id="dropZone">
-                <input type="file" id="fileInput">
+                <input type="file" id="fileInput" aria-label="Seleccionar archivo para inspeccionar" title="Selecciona un archivo">
                 <div class="upload-content">
                     <div class="upload-icon-wrapper">
                         <span class="material-symbols-rounded upload-icon-main">description</span>
                         <span class="material-symbols-rounded upload-icon-shield">shield</span>
                     </div>
-                    <h2 class="upload-title">Drop file to inspect</h2>
-                    <p class="upload-subtitle">or click to browse</p>
+                    <h2 class="upload-title">Suelta un archivo para inspeccionarlo</h2>
+                    <p class="upload-subtitle">o pulsa aquí para seleccionarlo</p>
                 </div>
             </div>
 
@@ -45,16 +76,24 @@
                 <!-- Header: Preview & Status -->
                 <div class="panel-header">
                     <div class="preview-wrapper">
-                        <img id="filePreview" alt="File preview">
+                        <div id="previewStage" class="preview-stage">
+                            <img id="filePreview" alt="Vista previa del archivo">
+                        </div>
                     </div>
                     <div class="status-wrapper">
                         <div class="status-header-row">
-                            <h3 id="fileNameDisplay" class="file-name-display">filename.jpg</h3>
+                            <div class="file-heading-block">
+                                <h3 id="fileNameDisplay" class="file-name-display">archivo.jpg</h3>
+                                <div class="file-meta-strip">
+                                    <span id="fileCategoryChip" class="meta-chip">Sin archivo</span>
+                                    <span id="fileMimeChip" class="meta-chip meta-chip-muted">Pendiente</span>
+                                </div>
+                            </div>
                             <div class="privacy-score-badge" id="privacyScoreBadge" style="display: none;">
                                 <span class="material-symbols-rounded score-icon" id="scoreIcon">health_and_safety</span>
                                 <div class="score-info">
                                     <span class="score-value" id="scoreValue">100</span>
-                                    <span class="score-label">Privacy Score</span>
+                                    <span class="score-label">Índice de privacidad</span>
                                 </div>
                             </div>
                         </div>
@@ -65,17 +104,17 @@
                         <div class="action-wrapper">
                             <button id="btnClean" class="btn-primary">
                                 <span class="material-symbols-rounded">cleaning_services</span>
-                                Clean Metadata
+                                Limpiar metadatos
                             </button>
-                            <button id="btnSelectiveClean" class="btn-primary" style="display: none; margin-top: 8px; background: var(--warning); color: #fff;">
+                            <button id="btnSelectiveClean" class="btn-primary" style="display: none; margin-top: 8px; background: var(--warning); color: #000; font-weight: 700;">
                                 <span class="material-symbols-rounded">checklist</span>
-                                Selective Clean
+                                Limpieza selectiva
                             </button>
                             <div id="cleaningProgress" class="cleaning-progress" style="display: none;">
                                 <div class="progress-bar">
                                     <div class="progress-fill"></div>
                                 </div>
-                                <span class="progress-text">Sanitizing file...</span>
+                                <span class="progress-text">Sanitizando archivo...</span>
                             </div>
                         </div>
                     </div>
@@ -85,7 +124,7 @@
                 <div class="search-container" id="searchContainer" style="display: none;">
                     <div class="search-input-wrapper">
                         <span class="material-symbols-rounded search-icon">search</span>
-                        <input type="search" id="metadataSearch" placeholder="Buscar metadatos (ej: GPS, Serial, Make...)" class="search-input">
+                        <input type="search" id="metadataSearch" placeholder="Buscar campos, valores o hallazgos" class="search-input">
                         <span id="searchResults" class="search-results-count"></span>
                     </div>
                 </div>
@@ -183,7 +222,7 @@
 
                     <div class="no-data-msg" id="noMetadataMsg" style="display: none;">
                         <span class="material-symbols-rounded">check_circle</span>
-                        No metadata detected
+                        No se detectaron metadatos ni datos sensibles
                     </div>
                 </div>
 
@@ -193,8 +232,8 @@
                         <div class="result-header">
                             <span class="material-symbols-rounded result-icon">verified_user</span>
                             <div class="result-text">
-                                <h4>Clean file available</h4>
-                                <p>All technical metadata has been removed.</p>
+                                <h4>Archivo limpio disponible</h4>
+                                <p>La salida procesada está lista para descargar o revisar.</p>
                             </div>
                         </div>
                         <div class="result-stats" id="resultStats">
@@ -229,11 +268,11 @@
                         <div class="action-group" style="display: flex; gap: 12px; margin-top: 12px;">
                             <button id="btnDownload" class="btn-success" style="flex: 1;">
                                 <span class="material-symbols-rounded">download</span>
-                                Download Safe File
+                                Descargar archivo limpio
                             </button>
                             <button id="btnExport" class="btn-primary" style="flex: 1;">
                                 <span class="material-symbols-rounded">receipt_long</span>
-                                Export Report
+                                Exportar informe
                             </button>
                         </div>
                     </div>
@@ -242,13 +281,5 @@
             </div>
         </main>
     </div>
-
-    <!-- Local library -->
-    <script src="lib/exif-reader.min.js"></script>
-    <script src="lib/piexif.js"></script>
-    <script src="lib/pdf.min.js"></script>
-    <script src="lib/jszip.min.js"></script>
-    <script src="lib/crypto-js.min.js"></script>
-    <script src="app.js"></script>
 </body>
 </html>

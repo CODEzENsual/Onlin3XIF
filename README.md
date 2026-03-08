@@ -1,6 +1,6 @@
 # Online EXIF Data Viewer 📷
 
-Un visor de metadatos EXIF moderno, seguro y 100% local. Diseñado con un estilo "glassmorphism" inspirado...
+Metadatos EXIF moderno, seguro y 100% local.
 
 ## ✨ Características
 
@@ -59,17 +59,3 @@ Las últimas actualizaciones han convertido a la aplicación en una *herramienta
 - 🧠 **Detección avanzada** de datos sensibles (IMEI, SSN, tarjetas, coordenadas, direcciones cripto...) con puntaje de privacidad optimizado.
 - 📉 Estadísticas de ahorro de tamaño tras limpieza y comparadores antes/después.
 - 🎨 Mejoras generales de UI/UX, incluyendo panel de diffs y carga mejorada.
-
-### Cambios principales en el motor de análisis
-
-- **Patrones y validadores** – la constante `REGEX_PATTERNS` ahora contiene expresiones más estrictas y, sobre todo, junto a cada regex hay una función de validación secundaria (por ejemplo, para teléfonos compruebo longitudes y prefijos válidos, para IMEI el checksum Luhn, etc.). Esto reduce matches sobre números aleatorios como los que salen en capturas de depuración.
-
-- **Clasificación de contenido** – se añadió `isTextLikeFile()` y en `handleFile()` se divide el flujo: si el fichero no es texto no se aplican regex indiscriminados, se extraen sólo metadatos y se analizan allí. De ese modo un `.jpg` con un valor numérico en EXIF ya no se interpreta como “phone”.
-
-- **Prioridad y deduplicación** – antes cada coincidencia se añadía a la lista y se puntuaba. Ahora se agrupan por tipo y valor único, y existe una jerarquía (IMEI gana sobre Phone, por ejemplo), de modo que no aparecen tres “teléfonos” por el mismo número ni se penaliza doblemente.
-
-- **Recalculo de score** – el riesgo final se basa en hallazgos fiables y únicos; no sube por repeticiones técnicas. La lógica de scoring está ubicada al final de `app.js`, también refactorizada.
-
-- **Análisis en metadatos** – en lugar de perder detecciones reales, la app sigue buscando PII en EXIF/XMP/ICCs cuando corresponde, pero con las reglas nuevas.
-
-El cambio objetivo fue convertir la simple lectura de EXIF en un **análisis completo de privacidad y limpieza**, ahora con menos ruido y más acierto.

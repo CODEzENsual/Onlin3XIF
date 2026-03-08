@@ -16,6 +16,7 @@
   font-family: "Material Symbols Rounded";
   font-style: normal;
   font-weight: 400;
+  font-display: swap;
   src: url("material-symbols.ttf") format("truetype");
 }
 .material-symbols-rounded {

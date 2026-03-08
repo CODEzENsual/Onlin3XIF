@@ -2,9 +2,7 @@ const themeBtn = document.getElementById('themeBtn');
 const themeIcon = document.getElementById('themeIcon');
 const html = document.documentElement;
 
-const savedTheme = localStorage.getItem('theme') || 'light';
-html.setAttribute('data-theme', savedTheme);
-updateThemeIcon(savedTheme);
+updateThemeIcon(html.getAttribute('data-theme') || 'light');
 
 themeBtn.addEventListener('click', () => {
     const currentTheme = html.getAttribute('data-theme');
@@ -84,9 +82,253 @@ const privacyScoreBadge = document.getElementById('privacyScoreBadge');
 const scoreIcon = document.getElementById('scoreIcon');
 const scoreValue = document.getElementById('scoreValue');
 const screenLockOverlay = document.getElementById('screenLockOverlay');
+const appContainer = document.querySelector('.app-container');
+const previewStage = document.getElementById('previewStage');
+const fileCategoryChip = document.getElementById('fileCategoryChip');
+const fileMimeChip = document.getElementById('fileMimeChip');
 
 let isScreenLocked = false;
 let unlockTimer = null;
+let previewBlobUrl = null;
+let previousTitle = document.title;
+
+const CODE_EXTENSIONS = new Set(['txt', 'md', 'json', 'xml', 'csv', 'log', 'html', 'htm', 'css', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'java', 'kt', 'cs', 'cpp', 'c', 'h', 'hpp', 'py', 'rb', 'php', 'go', 'rs', 'swift', 'sql', 'sh', 'bat', 'ps1', 'toml', 'ini', 'conf', 'cfg', 'env', 'dockerfile']);
+const DOCUMENT_EXTENSIONS = new Set(['pdf', 'doc', 'docx', 'rtf', 'odt', 'xls', 'xlsx', 'ods', 'ppt', 'pptx', 'odp']);
+const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac']);
+const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v']);
+const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'svg', 'avif', 'tif', 'tiff']);
+
+const ISO_BMFF_EXTENSIONS = new Set(['mp4', 'm4v', 'm4a', 'mov']);
+const MP4_CONTAINER_BOXES = new Set(['moov', 'trak', 'mdia', 'minf', 'stbl', 'dinf', 'edts', 'udta', 'ilst', 'meta', 'moof', 'traf', 'mfra', 'skip']);
+const MP4_REMOVABLE_BOXES = new Set(['udta']);
+
+function inferMimeType(extLower = '') {
+    const ext = String(extLower || '').toLowerCase();
+    const mimeMap = {
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        png: 'image/png',
+        webp: 'image/webp',
+        gif: 'image/gif',
+        bmp: 'image/bmp',
+        svg: 'image/svg+xml',
+        avif: 'image/avif',
+        tif: 'image/tiff',
+        tiff: 'image/tiff',
+        mp4: 'video/mp4',
+        webm: 'video/webm',
+        mov: 'video/quicktime',
+        mkv: 'video/x-matroska',
+        avi: 'video/x-msvideo',
+        mp3: 'audio/mpeg',
+        wav: 'audio/wav',
+        ogg: 'audio/ogg',
+        m4a: 'audio/mp4',
+        aac: 'audio/aac',
+        flac: 'audio/flac',
+        pdf: 'application/pdf',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        doc: 'application/msword',
+        txt: 'text/plain',
+        md: 'text/markdown',
+        json: 'application/json',
+        js: 'application/javascript',
+        mjs: 'application/javascript',
+        cjs: 'application/javascript',
+        css: 'text/css',
+        html: 'text/html',
+        htm: 'text/html',
+        xml: 'application/xml',
+        csv: 'text/csv'
+    };
+    return mimeMap[ext] || 'application/octet-stream';
+}
+
+function getFileCategory(file, extLower = '', mimeType = '') {
+    const mime = String(mimeType || file?.type || '').toLowerCase();
+    const ext = String(extLower || '').toLowerCase();
+    if (mime.startsWith('image/') || IMAGE_EXTENSIONS.has(ext)) {
+        return mime === 'image/gif' || ext === 'gif' ? 'GIF / imagen animada' : 'Imagen';
+    }
+    if (mime.startsWith('video/') || VIDEO_EXTENSIONS.has(ext)) return 'Vídeo';
+    if (mime.startsWith('audio/') || AUDIO_EXTENSIONS.has(ext)) return 'Audio';
+    if (mime === 'application/pdf' || ext === 'pdf') return 'PDF';
+    if (mime.includes('wordprocessingml') || ['doc', 'docx', 'odt', 'rtf'].includes(ext)) return 'Documento';
+    if (isTextLikeFile(file || { type: mime }, ext) || CODE_EXTENSIONS.has(ext)) {
+        return CODE_EXTENSIONS.has(ext) ? 'Código / texto' : 'Texto';
+    }
+    if (DOCUMENT_EXTENSIONS.has(ext)) return 'Documento';
+    return 'Archivo binario';
+}
+
+function getPreviewIcon(category = '') {
+    if (category.includes('Imagen') || category.includes('GIF')) return 'image';
+    if (category.includes('Vídeo')) return 'movie';
+    if (category.includes('Audio')) return 'audio_file';
+    if (category.includes('PDF')) return 'picture_as_pdf';
+    if (category.includes('Documento')) return 'description';
+    if (category.includes('Código')) return 'code';
+    if (category.includes('Texto')) return 'article';
+    return 'draft';
+}
+
+function getPreviewContainerClass(mimeType = '', category = '', extLower = '') {
+    const mime = String(mimeType || '').toLowerCase();
+    const ext = String(extLower || '').toLowerCase();
+    const cat = String(category || '').toLowerCase();
+    
+    if (mime.startsWith('video/') || VIDEO_EXTENSIONS.has(ext)) return 'preview-media--video';
+    if (mime.startsWith('image/') && (ext === 'gif' || mime === 'image/gif')) return 'preview-media--gif';
+    if (mime.startsWith('image/') || IMAGE_EXTENSIONS.has(ext)) return 'preview-media--image';
+    if (mime.startsWith('audio/') || AUDIO_EXTENSIONS.has(ext)) return 'preview-media--audio';
+    if (mime === 'application/pdf' || ext === 'pdf') return 'preview-media--pdf';
+    if (isTextLikeFile({ type: mime }, ext) || CODE_EXTENSIONS.has(ext)) return 'preview-media--text';
+    return '';
+}
+
+function isIsoBmffMedia(extLower = '', mimeType = '') {
+    const ext = String(extLower || '').toLowerCase();
+    const mime = String(mimeType || '').toLowerCase();
+    return ISO_BMFF_EXTENSIONS.has(ext) || mime === 'video/mp4' || mime === 'audio/mp4' || mime === 'video/quicktime';
+}
+
+function canCleanMetadata(file, extLower = '', mimeType = '') {
+    const mime = String(mimeType || file?.type || '').toLowerCase();
+    return mime.startsWith('image/') || isIsoBmffMedia(extLower, mime);
+}
+
+function canSelectiveCleanMetadata(file, extLower = '', mimeType = '') {
+    const mime = String(mimeType || file?.type || '').toLowerCase();
+    return mime.startsWith('image/');
+}
+
+function setFileHeader(category, mime) {
+    if (fileCategoryChip) fileCategoryChip.textContent = category || 'Sin clasificar';
+    if (fileMimeChip) fileMimeChip.textContent = mime || 'MIME no detectado';
+}
+
+function formatFindingsSummary(values) {
+    const count = values.length;
+    if (!count) return 'Sin valores concretos';
+    if (count === 1) return '1 valor único detectado';
+    return `${count} valores únicos detectados`;
+}
+
+function clearPreviewStage() {
+    if (previewBlobUrl) {
+        URL.revokeObjectURL(previewBlobUrl);
+        previewBlobUrl = null;
+    }
+    if (!previewStage) return;
+    
+    previewStage.innerHTML = '';
+    previewStage.classList.remove('preview-media--video', 'preview-media--audio', 'preview-media--image', 'preview-media--gif', 'preview-media--pdf', 'preview-media--text');
+    
+    if (previewStage.parentElement?.classList) {
+        previewStage.parentElement.classList.remove('preview-wrapper--enhanced');
+    }
+    
+    previewStage.appendChild(filePreview);
+    filePreview.removeAttribute('src');
+    filePreview.classList.remove('preview-media--video', 'preview-media--audio', 'preview-media--image', 'preview-media--gif', 'preview-media--pdf', 'preview-media--text');
+    filePreview.style.display = 'none';
+}
+
+function createPreviewFileCard(name, category, mimeType) {
+    const card = document.createElement('div');
+    card.className = 'preview-file-card';
+    card.innerHTML = `
+        <span class="material-symbols-rounded">${getPreviewIcon(category)}</span>
+        <span class="preview-file-type">${category}</span>
+        <strong class="preview-file-name">${name}</strong>
+        <span class="preview-file-meta">${mimeType || 'Formato no identificado'}</span>
+    `;
+    return card;
+}
+
+async function renderFilePreview(source, options = {}) {
+    const { name = 'archivo', extLower = '', mimeType = inferMimeType(extLower), category = getFileCategory({ type: mimeType }, extLower, mimeType) } = options;
+    clearPreviewStage();
+    if (!previewStage) return;
+    previewBlobUrl = URL.createObjectURL(source);
+
+    const containerClass = getPreviewContainerClass(mimeType, category, extLower);
+    if (containerClass && previewStage.parentElement?.classList) {
+        previewStage.parentElement.classList.add('preview-wrapper--enhanced');
+    }
+
+    if (mimeType.startsWith('image/')) {
+        filePreview.src = previewBlobUrl;
+        filePreview.classList.add(containerClass);
+        filePreview.style.display = 'block';
+        return;
+    }
+
+    if (mimeType.startsWith('video/')) {
+        const video = document.createElement('video');
+        video.className = `preview-media ${containerClass}`;
+        video.src = previewBlobUrl;
+        video.controls = true;
+        video.preload = 'metadata';
+        video.playsInline = true;
+        previewStage.appendChild(video);
+        
+        video.addEventListener('loadedmetadata', async () => {
+            try {
+                const canvas = document.createElement('canvas');
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                const ctx = canvas.getContext('2d');
+                video.currentTime = Math.min(1, video.duration * 0.1);
+                
+                video.addEventListener('seeked', () => {
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    const thumbnailUrl = canvas.toDataURL('image/jpeg', 0.85);
+                    video.poster = thumbnailUrl;
+                    canvas.remove();
+                }, { once: true });
+            } catch (e) {
+                console.warn('No se pudo generar thumbnail del vídeo');
+            }
+        }, { once: true });
+        return;
+    }
+
+    if (mimeType.startsWith('audio/')) {
+        const audio = document.createElement('audio');
+        audio.className = `preview-media ${containerClass}`;
+        audio.src = previewBlobUrl;
+        audio.controls = true;
+        audio.preload = 'metadata';
+        previewStage.appendChild(audio);
+        previewStage.appendChild(createPreviewFileCard(name, category, mimeType));
+        return;
+    }
+
+    if (mimeType === 'application/pdf') {
+        const frame = document.createElement('iframe');
+        frame.className = `preview-frame ${containerClass}`;
+        frame.src = previewBlobUrl;
+        frame.title = `Vista previa de ${name}`;
+        previewStage.appendChild(frame);
+        return;
+    }
+
+    if (isTextLikeFile({ type: mimeType }, extLower) || CODE_EXTENSIONS.has(extLower)) {
+        const pre = document.createElement('pre');
+        pre.className = `preview-text ${containerClass}`;
+        try {
+            const snippet = await source.slice(0, 12000).text();
+            pre.textContent = snippet || 'Archivo de texto vacío';
+        } catch {
+            pre.textContent = 'No se pudo leer una vista previa textual del archivo.';
+        }
+        previewStage.appendChild(pre);
+        return;
+    }
+
+    previewStage.appendChild(createPreviewFileCard(name, category, mimeType));
+}
 
 function setScreenLocked(locked) {
     if (isScreenLocked === locked) return;
@@ -94,12 +336,29 @@ function setScreenLocked(locked) {
 
     if (locked) {
         document.body.classList.add('screen-locked');
-        if (screenLockOverlay) screenLockOverlay.style.display = 'flex';
+        previousTitle = document.title;
+        document.title = 'Pantalla protegida';
+        if (screenLockOverlay) {
+            screenLockOverlay.style.display = 'flex';
+            screenLockOverlay.setAttribute('aria-hidden', 'false');
+        }
+        if (appContainer) {
+            appContainer.setAttribute('aria-hidden', 'true');
+            appContainer.inert = true;
+        }
         return;
     }
 
     document.body.classList.remove('screen-locked');
-    if (screenLockOverlay) screenLockOverlay.style.display = 'none';
+    document.title = previousTitle || 'Privacy Inspector';
+    if (screenLockOverlay) {
+        screenLockOverlay.style.display = 'none';
+        screenLockOverlay.setAttribute('aria-hidden', 'true');
+    }
+    if (appContainer) {
+        appContainer.removeAttribute('aria-hidden');
+        appContainer.inert = false;
+    }
 }
 
 function scheduleUnlock() {
@@ -198,15 +457,28 @@ async function applyState(state) {
     cleanSize = state.blob.size;
     if (cleanBlobUrl) URL.revokeObjectURL(cleanBlobUrl);
     cleanBlobUrl = URL.createObjectURL(state.blob);
+    const currentExt = (currentFile?.name.split('.').pop() || '').toLowerCase();
+    const activeMime = state.blob.type || currentFile?.type || inferMimeType(currentExt);
+    const activeCategory = getFileCategory({ type: activeMime }, currentExt, activeMime);
     
-    if (state.blob.type.startsWith('image/')) {
-        filePreview.src = cleanBlobUrl;
+    await renderFilePreview(state.blob, {
+        name: currentFile?.name || 'archivo',
+        extLower: currentExt,
+        mimeType: activeMime,
+        category: activeCategory
+    });
+
+    if (canCleanMetadata(currentFile, currentExt, activeMime)) {
         btnClean.style.display = 'inline-flex';
-        if (typeof btnSelectiveClean !== 'undefined') btnSelectiveClean.style.display = 'inline-flex';
+        if (typeof btnSelectiveClean !== 'undefined') {
+            btnSelectiveClean.style.display = canSelectiveCleanMetadata(currentFile, currentExt, activeMime) ? 'inline-flex' : 'none';
+        }
     } else {
         btnClean.style.display = 'none';
         if (typeof btnSelectiveClean !== 'undefined') btnSelectiveClean.style.display = 'none';
     }
+
+    setFileHeader(activeCategory, state.type === 'original' ? 'Estado original' : 'Vista del archivo limpio');
     
     cleanHash = await calculateSHA512(state.blob);
     const cleanHash256 = await calculateSHA256(state.blob);
@@ -264,6 +536,28 @@ btnRedo.addEventListener('click', async () => {
 
 const SENSITIVE_KEYS = ['GPS', 'Latitude', 'Longitude', 'Altitude', 'Location'];
 const WARNING_KEYS = ['Make', 'Model', 'Software', 'SerialNumber', 'LensSerialNumber', 'CameraSerialNumber'];
+const TECHNICAL_FILE_TAGS = new Set([
+    'BitsPerSample',
+    'ColorComponents',
+    'EncodingProcess',
+    'FileAccessDate',
+    'FileInodeChangeDate',
+    'FileModifyDate',
+    'FilePermissions',
+    'FileSize',
+    'FileType',
+    'FileTypeExtension',
+    'ImageHeight',
+    'ImageSize',
+    'ImageWidth',
+    'JFIFVersion',
+    'MIMEType',
+    'Megapixels',
+    'ResolutionUnit',
+    'XResolution',
+    'YCbCrSubSampling',
+    'YResolution'
+]);
 
 const REGEX_PATTERNS = {
     'Email': { regex: /\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b/g, penalty: 1.0, validator: isValidEmail },
@@ -326,8 +620,11 @@ function isValidIPv4(value, rawText = '', matchIndex = -1) {
     if (!allPartsValid) return false;
 
     if (matchIndex > -1 && rawText) {
-        const prefix = rawText.substring(Math.max(0, matchIndex - 30), matchIndex).toLowerCase();
-        if (/\b(?:version|ver|v)\s*[:=]?\s*$/.test(prefix)) return false;
+        const prefix = rawText.substring(Math.max(0, matchIndex - 40), matchIndex).toLowerCase();
+        if (/\b(?:version|ver|v|id|length|size|type)\s*[:=]?\s*$/.test(prefix)) return false;
+        
+        // Evitar falsos detectados en secuencias alfanuméricas o arrays binarios (,12,45,214, ...)
+        if (/([a-f0-9,<>{}'"\\]{15,})$/i.test(prefix)) return false; 
     }
 
     const n0 = Number(parts[0]);
@@ -375,8 +672,14 @@ function isValidIMEI(value, rawText = '', matchIndex = -1) {
     if (digits.length !== 15 || !luhnCheck(digits)) return false;
 
     if (matchIndex > -1 && rawText) {
-        const prefix = rawText.substring(Math.max(0, matchIndex - 30), matchIndex).toUpperCase();
-        if (prefix.includes('MAINWINDOW') || prefix.includes('HDITEM') || prefix.includes('VERSION') || prefix.includes('ID')) {
+        const prefix = rawText.substring(Math.max(0, matchIndex - 40), matchIndex).toUpperCase();
+        if (prefix.includes('MAINWINDOW') || prefix.includes('HDITEM') || 
+            prefix.includes('VERSION') || prefix.includes('ID') || 
+            prefix.includes('PRODUCT') || prefix.includes('SERIAL') || 
+            prefix.includes('LENGTH') || prefix.includes('SIZE')) {
+            return false;
+        }
+        if (/([A-F0-9,<>{}'"\\]{15,})$/i.test(prefix)) {
             return false;
         }
     }
@@ -391,8 +694,14 @@ function isLikelyIMSI(value, rawText = '', matchIndex = -1) {
     if (luhnCheck(digits)) return false;
 
     if (matchIndex > -1 && rawText) {
-        const prefix = rawText.substring(Math.max(0, matchIndex - 30), matchIndex).toUpperCase();
-        if (prefix.includes('MAINWINDOW') || prefix.includes('HDITEM') || prefix.includes('VERSION') || prefix.includes('ID')) {
+        const prefix = rawText.substring(Math.max(0, matchIndex - 40), matchIndex).toUpperCase();
+        if (prefix.includes('MAINWINDOW') || prefix.includes('HDITEM') || 
+            prefix.includes('VERSION') || prefix.includes('ID') || 
+            prefix.includes('PRODUCT') || prefix.includes('SERIAL') || 
+            prefix.includes('LENGTH') || prefix.includes('SIZE')) {
+            return false;
+        }
+        if (/([A-F0-9,<>{}'"\\]{15,})$/i.test(prefix)) {
             return false;
         }
     }
@@ -405,8 +714,14 @@ function isValidSSN(value, rawText = '', matchIndex = -1) {
     if (/0000$/.test(value)) return false;
 
     if (matchIndex > -1 && rawText) {
-        const prefix = rawText.substring(Math.max(0, matchIndex - 30), matchIndex).toUpperCase();
-        if (prefix.includes('MAINWINDOW') || prefix.includes('HDITEM') || prefix.includes('VERSION') || prefix.includes('ID') || prefix.includes('PRODUCT') || prefix.includes('SERIAL')) {
+        const prefix = rawText.substring(Math.max(0, matchIndex - 40), matchIndex).toUpperCase();
+        if (prefix.includes('MAINWINDOW') || prefix.includes('HDITEM') || 
+            prefix.includes('VERSION') || prefix.includes('ID') || 
+            prefix.includes('PRODUCT') || prefix.includes('SERIAL') || 
+            prefix.includes('LENGTH') || prefix.includes('SIZE')) {
+            return false;
+        }
+        if (/([A-F0-9,<>{}'"\\]{15,})$/i.test(prefix)) {
             return false;
         }
     }
@@ -421,8 +736,14 @@ function isLikelyPhone(value, rawText = '', matchIndex = -1) {
     if (/^\d{2}[-/.]\d{2}[-/.]\d{4}/.test(raw)) return false;
 
     if (matchIndex > -1 && rawText) {
-        const prefix = rawText.substring(Math.max(0, matchIndex - 30), matchIndex).toUpperCase();
-        if (prefix.includes('MAINWINDOW') || prefix.includes('HDITEM') || prefix.includes('VERSION')) {
+        const prefix = rawText.substring(Math.max(0, matchIndex - 40), matchIndex).toUpperCase();
+        if (prefix.includes('MAINWINDOW') || prefix.includes('HDITEM') || 
+            prefix.includes('VERSION') || prefix.includes('ID') || 
+            prefix.includes('PRODUCT') || prefix.includes('SERIAL') || 
+            prefix.includes('LENGTH') || prefix.includes('SIZE')) {
+            return false;
+        }
+        if (/([A-F0-9,<>{}'"\\]{15,})$/i.test(prefix)) {
             return false;
         }
     }
@@ -443,8 +764,14 @@ function isValidCreditCard(value, rawText = '', matchIndex = -1) {
     if (!/^[3456]/.test(digits)) return false;
 
     if (matchIndex > -1 && rawText) {
-        const prefix = rawText.substring(Math.max(0, matchIndex - 30), matchIndex).toUpperCase();
-        if (prefix.includes('MAINWINDOW') || prefix.includes('HDITEM') || prefix.includes('VERSION') || prefix.includes('ID')) {
+        const prefix = rawText.substring(Math.max(0, matchIndex - 40), matchIndex).toUpperCase();
+        if (prefix.includes('MAINWINDOW') || prefix.includes('HDITEM') || 
+            prefix.includes('VERSION') || prefix.includes('ID') || 
+            prefix.includes('PRODUCT') || prefix.includes('SERIAL') || 
+            prefix.includes('LENGTH') || prefix.includes('SIZE')) {
+            return false;
+        }
+        if (/([A-F0-9,<>{}'"\\]{15,})$/i.test(prefix)) {
             return false;
         }
     }
@@ -482,6 +809,16 @@ function normalizeSensitiveValue(label, value) {
         return normalizeDigits(raw);
     }
     return raw.toLowerCase();
+}
+
+function isTechnicalExifTag(key, value) {
+    if (TECHNICAL_FILE_TAGS.has(key)) return true;
+    const normalizedValue = String(value || '').trim();
+    if (!normalizedValue) return false;
+    if (/^\d+x\d+$/i.test(normalizedValue)) return true;
+    if (/^image\/[a-z0-9.+-]+$/i.test(normalizedValue)) return true;
+    if (/^progressive dct/i.test(normalizedValue)) return true;
+    return false;
 }
 
 dropZone.addEventListener('dragover', (e) => {
@@ -592,8 +929,481 @@ for (let i = 0; i < 256; i++) {
 }
 
 function formatDate(date) {
-    if (!date) return 'Unknown';
+    if (!date) return 'Desconocido';
     return new Date(date).toLocaleString();
+}
+
+function readFourCC(view, offset) {
+    if (offset + 4 > view.byteLength) return '';
+    let result = '';
+    for (let i = 0; i < 4; i++) {
+        const code = view.getUint8(offset + i);
+        result += code >= 32 && code <= 126 ? String.fromCharCode(code) : String.fromCharCode(code);
+    }
+    return result;
+}
+
+function readUInt64Number(view, offset) {
+    if (offset + 8 > view.byteLength) return 0;
+    const high = view.getUint32(offset);
+    const low = view.getUint32(offset + 4);
+    return high * 4294967296 + low;
+}
+
+function decodeLatin1(view, offset, length) {
+    if (length <= 0 || offset >= view.byteLength) return '';
+    const end = Math.min(offset + length, view.byteLength);
+    let result = '';
+    for (let i = offset; i < end; i++) {
+        result += String.fromCharCode(view.getUint8(i));
+    }
+    return result;
+}
+
+function decodeUtf8(bytes) {
+    try {
+        return new TextDecoder('utf-8', {fatal: false}).decode(bytes);
+    } catch {
+        let fallback = '';
+        for (let i = 0; i < bytes.length; i++) {
+            fallback += String.fromCharCode(bytes[i]);
+        }
+        return fallback;
+    }
+}
+
+function sanitizeMp4Text(value) {
+    return String(value || '')
+        .replace(/\u0000/g, '')
+        .replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function formatMp4Language(code) {
+    if (!code || code === 0) return 'und';
+    const chars = [
+        ((code >> 10) & 0x1f) + 0x60,
+        ((code >> 5) & 0x1f) + 0x60,
+        (code & 0x1f) + 0x60
+    ];
+    return chars.map(charCode => String.fromCharCode(charCode)).join('');
+}
+
+function formatSeconds(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return 'Desconocido';
+    return `${seconds.toFixed(2)} s`;
+}
+
+function formatFixed16_16(value) {
+    return value / 65536;
+}
+
+function formatFixed8_8(value) {
+    return value / 256;
+}
+
+function formatBitrateValue(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) return 'Desconocido';
+    const mbps = numeric / 1000000;
+    return `${Math.round(numeric)} bps (${mbps.toFixed(2)} Mbps)`;
+}
+
+function getMp4MetadataLabel(type) {
+    const labels = {
+        '©nam': 'Title',
+        '©ART': 'Artist',
+        'aART': 'AlbumArtist',
+        '©alb': 'Album',
+        '©day': 'CreateDate',
+        '©too': 'Encoder',
+        '©cmt': 'Comment',
+        'desc': 'Description',
+        'ldes': 'LongDescription',
+        'cprt': 'Copyright',
+        'covr': 'CoverArt',
+        'tmpo': 'Tempo',
+        'trkn': 'TrackNumber',
+        'disk': 'DiscNumber',
+        'gnre': 'Genre',
+        'keyw': 'Keywords'
+    };
+    return labels[type] || `Tag ${type}`;
+}
+
+function parseMp4DataBox(itemType, view, start, end) {
+    if (end - start < 8) return null;
+    const dataType = view.getUint32(start);
+    const payloadStart = start + 8;
+    if (payloadStart > end) return null;
+    const payload = new Uint8Array(view.buffer, view.byteOffset + payloadStart, end - payloadStart);
+
+    if (itemType === 'covr') {
+        return {label: getMp4MetadataLabel(itemType), value: `Datos binarios ${payload.length} bytes`, rawValue: payload.length, binary: true};
+    }
+
+    if ((itemType === 'trkn' || itemType === 'disk') && payload.length >= 6) {
+        const current = (payload[2] << 8) | payload[3];
+        const total = (payload[4] << 8) | payload[5];
+        const value = total > 0 ? `${current}/${total}` : String(current);
+        return {label: getMp4MetadataLabel(itemType), value, rawValue: value};
+    }
+
+    if (payload.length === 0) return null;
+
+    if (dataType === 1 || dataType === 0) {
+        const value = sanitizeMp4Text(decodeUtf8(payload));
+        return value ? {label: getMp4MetadataLabel(itemType), value, rawValue: value} : null;
+    }
+
+    if (dataType === 21 || dataType === 22 || dataType === 23 || dataType === 24) {
+        let number = 0;
+        for (let i = 0; i < Math.min(payload.length, 8); i++) {
+            number = (number * 256) + payload[i];
+        }
+        const value = String(number);
+        return {label: getMp4MetadataLabel(itemType), value, rawValue: number};
+    }
+
+    const fallback = sanitizeMp4Text(decodeUtf8(payload));
+    if (fallback) {
+        return {label: getMp4MetadataLabel(itemType), value: fallback, rawValue: fallback};
+    }
+
+    return {label: getMp4MetadataLabel(itemType), value: `Datos binarios ${payload.length} bytes`, rawValue: payload.length, binary: true};
+}
+
+function parseMp4Metadata(arrayBuffer, fileSize = 0) {
+    const view = new DataView(arrayBuffer);
+    const structure = [];
+    const metadata = [];
+    const raw = {brands: {}, movie: {}, tracks: [], metadata: {}};
+    const seenStructure = new Set();
+    const seenMetadata = new Set();
+
+    const pushStructure = (label, value) => {
+        const normalized = sanitizeMp4Text(value);
+        if (!normalized) return;
+        const key = `${label}:${normalized}`;
+        if (seenStructure.has(key)) return;
+        seenStructure.add(key);
+        structure.push({label, value: normalized});
+    };
+
+    const pushMetadata = (label, value) => {
+        const normalized = sanitizeMp4Text(value);
+        if (!normalized) return;
+        const key = `${label}:${normalized}`;
+        if (seenMetadata.has(key)) return;
+        seenMetadata.add(key);
+        metadata.push({label, value: normalized});
+        if (!raw.metadata[label]) raw.metadata[label] = [];
+        raw.metadata[label].push(normalized);
+    };
+
+    const parseBoxes = (start, end, context = {}) => {
+        let offset = start;
+
+        while (offset + 8 <= end && offset + 8 <= view.byteLength) {
+            let headerSize = 8;
+            let size = view.getUint32(offset);
+            const type = readFourCC(view, offset + 4);
+            if (!type) break;
+
+            if (size === 1) {
+                if (offset + 16 > end) break;
+                size = readUInt64Number(view, offset + 8);
+                headerSize = 16;
+            } else if (size === 0) {
+                size = end - offset;
+            }
+
+            if (!Number.isFinite(size) || size < headerSize || offset + size > end) break;
+
+            const contentStart = offset + headerSize;
+            const boxEnd = offset + size;
+
+            if (type === 'ftyp') {
+                const majorBrand = readFourCC(view, contentStart);
+                const minorVersion = contentStart + 8 <= boxEnd ? view.getUint32(contentStart + 4) : 0;
+                const compatibleBrands = [];
+                for (let brandOffset = contentStart + 8; brandOffset + 4 <= boxEnd; brandOffset += 4) {
+                    const brand = readFourCC(view, brandOffset);
+                    if (brand) compatibleBrands.push(brand);
+                }
+                raw.brands = {majorBrand, minorVersion, compatibleBrands};
+                pushStructure('MajorBrand', majorBrand);
+                pushStructure('MinorVersion', String(minorVersion));
+                if (compatibleBrands.length > 0) {
+                    pushStructure('CompatibleBrands', JSON.stringify(compatibleBrands));
+                }
+            } else if (type === 'moov' || type === 'udta' || type === 'mdia' || type === 'minf' || type === 'stbl') {
+                parseBoxes(contentStart, boxEnd, context);
+            } else if (type === 'meta') {
+                parseBoxes(contentStart + 4, boxEnd, context);
+            } else if (type === 'trak') {
+                const track = {};
+                raw.tracks.push(track);
+                parseBoxes(contentStart, boxEnd, {...context, track});
+            } else if (type === 'mvhd') {
+                const version = view.getUint8(contentStart);
+                const timescaleOffset = contentStart + (version === 1 ? 20 : 12);
+                const durationOffset = contentStart + (version === 1 ? 24 : 16);
+                if (durationOffset + (version === 1 ? 8 : 4) <= boxEnd) {
+                    const timescale = view.getUint32(timescaleOffset);
+                    const durationUnits = version === 1 ? readUInt64Number(view, durationOffset) : view.getUint32(durationOffset);
+                    const rate = formatFixed16_16(view.getUint32(contentStart + (version === 1 ? 32 : 20)));
+                    const volume = formatFixed8_8(view.getUint16(contentStart + (version === 1 ? 36 : 24)));
+                    const durationSeconds = timescale > 0 ? durationUnits / timescale : 0;
+                    raw.movie = {timescale, durationUnits, durationSeconds, rate, volume};
+                    pushStructure('TimeScale', String(timescale));
+                    pushStructure('Duration', formatSeconds(durationSeconds));
+                    pushStructure('MediaDuration', formatSeconds(durationSeconds));
+                    pushStructure('PreferredRate', String(Number(rate.toFixed(2))));
+                    pushStructure('PreferredVolume', `${(volume * 100).toFixed(2)}%`);
+                    if (fileSize > 0 && durationSeconds > 0) {
+                        pushStructure('AverageBitrate', formatBitrateValue((fileSize * 8) / durationSeconds));
+                    }
+                }
+            } else if (type === 'tkhd' && context.track) {
+                const version = view.getUint8(contentStart);
+                const trackIdOffset = contentStart + (version === 1 ? 20 : 12);
+                const durationOffset = contentStart + (version === 1 ? 28 : 20);
+                const layerOffset = contentStart + (version === 1 ? 40 : 32);
+                const volumeOffset = contentStart + (version === 1 ? 44 : 36);
+                const widthOffset = contentStart + (version === 1 ? 76 : 64);
+                const heightOffset = contentStart + (version === 1 ? 80 : 68);
+                const trackId = view.getUint32(trackIdOffset);
+                const durationUnits = version === 1 ? readUInt64Number(view, durationOffset) : view.getUint32(durationOffset);
+                const layer = view.getInt16(layerOffset);
+                const volume = formatFixed8_8(view.getUint16(volumeOffset));
+                const width = Math.round(formatFixed16_16(view.getUint32(widthOffset)));
+                const height = Math.round(formatFixed16_16(view.getUint32(heightOffset)));
+                context.track.trackId = trackId;
+                context.track.durationUnits = durationUnits;
+                context.track.layer = layer;
+                context.track.volume = volume;
+                context.track.width = width;
+                context.track.height = height;
+                pushStructure('TrackID', String(trackId));
+                pushStructure('TrackLayer', String(layer));
+                pushStructure('TrackVolume', `${(volume * 100).toFixed(2)}%`);
+                if (width > 0 && height > 0) {
+                    pushStructure('SourceImageWidth', String(width));
+                    pushStructure('SourceImageHeight', String(height));
+                }
+            } else if (type === 'mdhd' && context.track) {
+                const version = view.getUint8(contentStart);
+                const timescaleOffset = contentStart + (version === 1 ? 20 : 12);
+                const durationOffset = contentStart + (version === 1 ? 24 : 16);
+                const languageOffset = contentStart + (version === 1 ? 32 : 24);
+                const timescale = view.getUint32(timescaleOffset);
+                const durationUnits = version === 1 ? readUInt64Number(view, durationOffset) : view.getUint32(durationOffset);
+                const languageCode = formatMp4Language(view.getUint16(languageOffset));
+                const durationSeconds = timescale > 0 ? durationUnits / timescale : 0;
+                context.track.mediaTimeScale = timescale;
+                context.track.mediaDuration = durationSeconds;
+                context.track.languageCode = languageCode;
+                pushStructure('MediaTimeScale', String(timescale));
+                pushStructure('TrackDuration', formatSeconds(durationSeconds));
+                pushStructure('MediaLanguageCode', languageCode);
+            } else if (type === 'hdlr' && context.track) {
+                const handlerType = readFourCC(view, contentStart + 8);
+                const vendorId = readFourCC(view, contentStart + 12);
+                const nameBytes = new Uint8Array(view.buffer, view.byteOffset + contentStart + 24, Math.max(0, boxEnd - (contentStart + 24)));
+                let handlerName = sanitizeMp4Text(decodeUtf8(nameBytes));
+                if (handlerName && handlerName.charCodeAt(0) === handlerName.length - 1) {
+                    handlerName = handlerName.slice(1);
+                }
+                context.track.handlerType = handlerType;
+                context.track.vendorId = vendorId;
+                context.track.handlerName = handlerName;
+                pushStructure('HandlerType', handlerType || 'unknown');
+                if (vendorId && /[A-Za-z0-9]/.test(vendorId)) pushStructure('HandlerVendorID', vendorId);
+                if (handlerName) pushStructure('HandlerDescription', handlerName);
+            } else if (type === 'stsd' && context.track) {
+                const entryCount = view.getUint32(contentStart + 4);
+                let sampleOffset = contentStart + 8;
+                for (let index = 0; index < entryCount && sampleOffset + 8 <= boxEnd; index++) {
+                    const entrySize = view.getUint32(sampleOffset);
+                    const sampleType = readFourCC(view, sampleOffset + 4);
+                    if (!entrySize || sampleOffset + entrySize > boxEnd) break;
+                    context.track.sampleType = sampleType;
+                    if (['avc1', 'hvc1', 'hev1', 'mp4v', 'encv'].includes(sampleType) && entrySize >= 86) {
+                        const width = view.getUint16(sampleOffset + 32);
+                        const height = view.getUint16(sampleOffset + 34);
+                        const compressorRaw = decodeLatin1(view, sampleOffset + 50, 32);
+                        const compressorLength = compressorRaw.charCodeAt(0);
+                        const compressor = sanitizeMp4Text(compressorRaw.slice(1, 1 + Math.min(compressorLength, 31)));
+                        const depth = view.getUint16(sampleOffset + 82);
+                        context.track.width = width || context.track.width;
+                        context.track.height = height || context.track.height;
+                        context.track.compressorId = sampleType;
+                        context.track.bitDepth = depth;
+                        pushStructure('CompressorID', sampleType);
+                        if (compressor) pushStructure('CompressorName', compressor);
+                        if (width > 0 && height > 0) pushStructure('ImageSize', `${width}x${height}`);
+                        if (depth > 0) pushStructure('BitDepth', String(depth));
+                        parseBoxes(sampleOffset + 86, sampleOffset + entrySize, context);
+                    } else if (['mp4a', 'ac-3', 'ec-3', 'enca'].includes(sampleType) && entrySize >= 36) {
+                        const channelCount = view.getUint16(sampleOffset + 24);
+                        const sampleSize = view.getUint16(sampleOffset + 26);
+                        const sampleRate = Math.round(formatFixed16_16(view.getUint32(sampleOffset + 32)));
+                        context.track.audioFormat = sampleType;
+                        context.track.audioChannels = channelCount;
+                        context.track.audioBitsPerSample = sampleSize;
+                        context.track.audioSampleRate = sampleRate;
+                        pushStructure('AudioFormat', sampleType);
+                        pushStructure('AudioChannels', String(channelCount));
+                        pushStructure('AudioBitsPerSample', String(sampleSize));
+                        if (sampleRate > 0) pushStructure('AudioSampleRate', String(sampleRate));
+                        parseBoxes(sampleOffset + 36, sampleOffset + entrySize, context);
+                    } else {
+                        parseBoxes(sampleOffset + 16, sampleOffset + entrySize, context);
+                    }
+                    sampleOffset += entrySize;
+                }
+            } else if (type === 'btrt') {
+                const bufferSize = view.getUint32(contentStart);
+                const maxBitrate = view.getUint32(contentStart + 4);
+                const avgBitrate = view.getUint32(contentStart + 8);
+                pushStructure('BufferSize', String(bufferSize));
+                if (maxBitrate > 0) pushStructure('MaxBitrate', formatBitrateValue(maxBitrate));
+                if (avgBitrate > 0) pushStructure('AvgBitrate', formatBitrateValue(avgBitrate));
+            } else if (type === 'ilst') {
+                parseBoxes(contentStart, boxEnd, {...context, inIlst: true});
+            } else if (context.inIlst) {
+                let childOffset = contentStart;
+                while (childOffset + 8 <= boxEnd) {
+                    let childSize = view.getUint32(childOffset);
+                    const childType = readFourCC(view, childOffset + 4);
+                    if (childSize === 1) {
+                        childSize = readUInt64Number(view, childOffset + 8);
+                    } else if (childSize === 0) {
+                        childSize = boxEnd - childOffset;
+                    }
+                    const childHeader = view.getUint32(childOffset) === 1 ? 16 : 8;
+                    if (!childSize || childOffset + childSize > boxEnd) break;
+                    if (childType === 'data') {
+                        const parsed = parseMp4DataBox(type, view, childOffset + childHeader, childOffset + childSize);
+                        if (parsed) {
+                            pushMetadata(parsed.label, parsed.value);
+                        }
+                    }
+                    childOffset += childSize;
+                }
+            }
+
+            offset = boxEnd;
+        }
+    };
+
+    parseBoxes(0, view.byteLength, {});
+
+    const videoTrack = raw.tracks.find(track => track.width > 0 && track.height > 0);
+    if (videoTrack) {
+        pushStructure('ImageWidth', String(videoTrack.width));
+        pushStructure('ImageHeight', String(videoTrack.height));
+        pushStructure('Megapixels', (videoTrack.width * videoTrack.height / 1000000).toFixed(3));
+        if (videoTrack.mediaDuration > 0 && fileSize > 0) {
+            const estimatedFrameRate = raw.movie.durationSeconds > 0 ? null : null;
+            if (videoTrack.mediaDuration > 0 && raw.movie.durationSeconds > 0) {
+                const ratio = raw.movie.durationSeconds / videoTrack.mediaDuration;
+                if (Number.isFinite(ratio) && ratio > 0) {
+                    const normalized = Math.round((1 / ratio) * 100) / 100;
+                    if (normalized >= 1 && normalized <= 240) {
+                        pushStructure('VideoFrameRate', String(normalized));
+                    }
+                }
+            }
+        }
+    }
+
+    return {
+        found: structure.length > 0 || metadata.length > 0,
+        structure,
+        metadata,
+        raw
+    };
+}
+
+function concatUint8Arrays(chunks) {
+    const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    chunks.forEach(chunk => {
+        result.set(chunk, offset);
+        offset += chunk.length;
+    });
+    return result;
+}
+
+function createMp4Box(type, content, extendedMetaPrefix = null) {
+    const headerLength = extendedMetaPrefix ? 12 : 8;
+    const box = new Uint8Array(headerLength + content.length);
+    const view = new DataView(box.buffer);
+    view.setUint32(0, box.length);
+    for (let i = 0; i < 4; i++) {
+        box[4 + i] = type.charCodeAt(i);
+    }
+    if (extendedMetaPrefix) {
+        box.set(extendedMetaPrefix, 8);
+        box.set(content, 12);
+    } else {
+        box.set(content, 8);
+    }
+    return box;
+}
+
+function stripMp4Metadata(arrayBuffer) {
+    const source = new Uint8Array(arrayBuffer);
+    const view = new DataView(source.buffer, source.byteOffset, source.byteLength);
+
+    const rebuildRange = (start, end, parentType = '') => {
+        const chunks = [];
+        let offset = start;
+
+        while (offset + 8 <= end) {
+            let headerSize = 8;
+            let size = view.getUint32(offset);
+            const type = readFourCC(view, offset + 4);
+            if (!type) break;
+
+            if (size === 1) {
+                if (offset + 16 > end) break;
+                size = readUInt64Number(view, offset + 8);
+                headerSize = 16;
+            } else if (size === 0) {
+                size = end - offset;
+            }
+
+            if (!Number.isFinite(size) || size < headerSize || offset + size > end) break;
+
+            const contentStart = offset + headerSize;
+            const boxEnd = offset + size;
+            const shouldRemove = MP4_REMOVABLE_BOXES.has(type);
+
+            if (!shouldRemove) {
+                if (type === 'meta') {
+                    const metaPrefix = source.slice(contentStart, contentStart + 4);
+                    const rebuiltContent = rebuildRange(contentStart + 4, boxEnd, type);
+                    chunks.push(createMp4Box(type, rebuiltContent, metaPrefix));
+                } else if (MP4_CONTAINER_BOXES.has(type)) {
+                    const rebuiltContent = rebuildRange(contentStart, boxEnd, type);
+                    chunks.push(createMp4Box(type, rebuiltContent));
+                } else {
+                    chunks.push(source.slice(offset, boxEnd));
+                }
+            }
+
+            offset = boxEnd;
+        }
+
+        return concatUint8Arrays(chunks);
+    };
+
+    return rebuildRange(0, source.length);
 }
 
 function addInfoRow(container, label, value, valueClass = '', isRemovable = false, tagKey = '') {
@@ -671,14 +1481,13 @@ function filterMetadata(query) {
         rows.forEach(row => {
             const labelEl = row.querySelector('.data-label');
             const valueEl = row.querySelector('.data-value');
+            if (!labelEl || !valueEl) return;
             
-            // Reset highlights
             labelEl.innerHTML = labelEl.textContent;
             valueEl.innerHTML = valueEl.textContent;
             
             if (!q) {
                 row.style.display = 'flex';
-                sectionMatches++;
                 return;
             }
             
@@ -711,11 +1520,16 @@ function filterMetadata(query) {
             if (sectionMatches > 0) section.open = true;
         } else {
             section.style.display = (alwaysShow || rows.length > 0) ? 'block' : 'none';
+            sectionMatches = rows.length;
+        }
+
+        if (!q) {
+            totalMatches += sectionMatches;
         }
     });
     
     if (q) {
-        searchResults.textContent = `${totalMatches} resultado${totalMatches !== 1 ? 's' : ''}`;
+        searchResults.textContent = `${totalMatches} coincidencia${totalMatches !== 1 ? 's' : ''}`;
     } else {
         searchResults.textContent = '';
     }
@@ -730,24 +1544,26 @@ async function handleFile(file) {
         currentFile = file;
         originalSize = file.size;
         const extLower = (file.name.split('.').pop() || '').toLowerCase();
+        const inferredMime = file.type || inferMimeType(extLower);
+        const fileCategory = getFileCategory(file, extLower, inferredMime);
         
         if (cleanBlobUrl) URL.revokeObjectURL(cleanBlobUrl);
         cleanBlobUrl = null;
         
-        const isImage = file.type.startsWith('image/');
-        const isVideo = file.type.startsWith('video/');
-        const isAudio = file.type.startsWith('audio/');
-        const isPdf = file.type === 'application/pdf';
-        const isDocx = file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        const isImage = inferredMime.startsWith('image/');
+        const isVideo = inferredMime.startsWith('video/');
+        const isAudio = inferredMime.startsWith('audio/');
+        const isPdf = inferredMime === 'application/pdf';
+        const isDocx = inferredMime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
         const isText = isTextLikeFile(file, extLower);
         
         dropZone.classList.add('compact');
         inspectionPanel.style.display = 'flex';
         resultSection.style.display = 'none';
         
-        if (isImage) {
+        if (canCleanMetadata(file, extLower, inferredMime)) {
             btnClean.style.display = 'inline-flex';
-            btnSelectiveClean.style.display = 'inline-flex';
+            btnSelectiveClean.style.display = canSelectiveCleanMetadata(file, extLower, inferredMime) ? 'inline-flex' : 'none';
             btnClean.disabled = false;
             btnSelectiveClean.disabled = false;
         } else {
@@ -756,7 +1572,7 @@ async function handleFile(file) {
         }
         
         cleaningProgress.style.display = 'none';
-        progressFill.style.width = '0%';
+        progressFill.style.transform = 'scaleX(0)';
         
         geoSection.style.display = 'none';
         exifSection.style.display = 'none';
@@ -769,34 +1585,28 @@ async function handleFile(file) {
         searchResults.textContent = '';
         
         document.querySelectorAll('.select-all-cb').forEach(cb => cb.checked = false);
+
+        await renderFilePreview(file, {
+            name: file.name,
+            extLower,
+            mimeType: inferredMime,
+            category: fileCategory
+        });
         
-        if (isImage) {
-            filePreview.src = URL.createObjectURL(file);
-            filePreview.style.display = 'block';
-        } else if (isPdf) {
-            filePreview.src = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23dc2626"><path d="M20 2H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-8.5 7.5c0 .83-.67 1.5-1.5 1.5H9v2H7.5V7H10c.83 0 1.5.67 1.5 1.5v1zm5 2c0 .83-.67 1.5-1.5 1.5h-2.5V7H15c.83 0 1.5.67 1.5 1.5v3zm4-3H19v1h1.5V11H19v2h-1.5V7h3v1.5zM9 9.5h1v-1H9v1zM4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm10 5.5h1v-3h-1v3z"/></svg>';
-            filePreview.style.display = 'block';
-        } else if (isDocx) {
-            filePreview.src = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%232563eb"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>';
-            filePreview.style.display = 'block';
-        } else {
-            filePreview.src = '';
-            filePreview.style.display = 'none';
-        }
-        
-        // Reset Undo/Redo state for new file
         historyStack = [];
         historyIndex = -1;
         saveState(file, [], 'original');
         
         fileNameDisplay.textContent = file.name;
+        setFileHeader(fileCategory, inferredMime || 'MIME no detectado');
         setPrivacyStatus('success', 'check_circle', 'Analizando...');
         
         identityGrid.innerHTML = '';
         const ext = file.name.split('.').pop().toUpperCase();
         addInfoRow(identityGrid, 'Nombre completo', file.name);
         addInfoRow(identityGrid, 'Extensión real', `.${ext}`);
-        addInfoRow(identityGrid, 'Tipo MIME', file.type || 'Unknown');
+        addInfoRow(identityGrid, 'Tipo MIME', inferredMime || 'Desconocido');
+        addInfoRow(identityGrid, 'Categoría detectada', fileCategory);
         addInfoRow(identityGrid, 'Tamaño exacto', `${file.size} bytes`);
         addInfoRow(identityGrid, 'Tamaño legible', formatBytes(file.size));
         addInfoRow(identityGrid, 'Modificado', formatDate(file.lastModified));
@@ -813,10 +1623,11 @@ async function handleFile(file) {
         
         structureGrid.innerHTML = '';
         addInfoRow(structureGrid, 'Formato', ext);
+        addInfoRow(structureGrid, 'Visualización', fileCategory);
         
         if (isImage) {
             const img = new Image();
-            img.src = filePreview.src;
+            img.src = previewBlobUrl || '';
             await new Promise(resolve => {
                 img.onload = () => {
                     addInfoRow(structureGrid, 'Resolución exacta', `${img.width} × ${img.height} px`);
@@ -834,17 +1645,28 @@ async function handleFile(file) {
             });
         } else if (isVideo || isAudio) {
             const media = document.createElement(isVideo ? 'video' : 'audio');
-            media.src = URL.createObjectURL(file);
+            const mediaUrl = URL.createObjectURL(file);
+            media.src = mediaUrl;
             await new Promise(resolve => {
                 media.onloadedmetadata = () => {
                     addInfoRow(structureGrid, 'Duración', `${media.duration.toFixed(2)} s`);
                     if (isVideo) {
                         addInfoRow(structureGrid, 'Resolución', `${media.videoWidth} × ${media.videoHeight} px`);
                     }
+                    URL.revokeObjectURL(mediaUrl);
                     resolve();
                 };
-                media.onerror = resolve;
+                media.onerror = () => {
+                    URL.revokeObjectURL(mediaUrl);
+                    resolve();
+                };
             });
+        } else if (isText || CODE_EXTENSIONS.has(extLower)) {
+            const snippet = await file.slice(0, 2000).text();
+            addInfoRow(structureGrid, 'Fragmento analizado', `${snippet.length} caracteres`);
+            addInfoRow(structureGrid, 'Codificación estimada', 'UTF-8 / texto plano');
+        } else if (isPdf || isDocx) {
+            addInfoRow(structureGrid, 'Documento', isPdf ? 'Portable Document Format' : 'Office Open XML');
         }
 
         exifGrid.innerHTML = '';
@@ -857,6 +1679,7 @@ async function handleFile(file) {
         let hasExif = false;
         let hasGeo = false;
         let hasExtended = false;
+        let hasContainerMetadata = false;
         let hasSensitive = false;
         const sensitiveFindings = [];
         const sensitiveFindingKeys = new Set();
@@ -926,10 +1749,18 @@ async function handleFile(file) {
                     rawSection.style.display = 'block';
                     
                     if (tags.exif && Object.keys(tags.exif).length > 0) {
+                        const visibleExifEntries = Object.entries(tags.exif).filter(([key, tag]) => {
+                            const isBinary = tag.value instanceof Uint8Array || tag.value instanceof ArrayBuffer || (Array.isArray(tag.value) && tag.value.length > 30);
+                            const val = tag.description || (isBinary ? '[Binary Data]' : String(tag.value));
+                            return !isTechnicalExifTag(key, val);
+                        });
+
+                        if (visibleExifEntries.length > 0) {
                         hasExif = true;
                         exifSection.style.display = 'block';
-                        for (const [key, tag] of Object.entries(tags.exif)) {
-                            const val = tag.description || tag.value;
+                        for (const [key, tag] of visibleExifEntries) {
+                            const isBinary = tag.value instanceof Uint8Array || tag.value instanceof ArrayBuffer || (Array.isArray(tag.value) && tag.value.length > 30);
+                            const val = tag.description || (isBinary ? '[Binary Data]' : String(tag.value));
                             extractedTags[`EXIF:${key}`] = val;
                             totalTags++;
                             analyzeSensitiveText(String(val || ''), key);
@@ -946,6 +1777,7 @@ async function handleFile(file) {
                             let valClass = isSens ? 'sensitive' : (isWarn ? 'warning' : '');
                             addInfoRow(exifGrid, key, val, valClass, true, `EXIF:${key}`);
                         }
+                        }
                     }
                     
                     if (tags.gps && Object.keys(tags.gps).length > 0) {
@@ -953,7 +1785,8 @@ async function handleFile(file) {
                         hasSensitive = true;
                         geoSection.style.display = 'block';
                         for (const [key, tag] of Object.entries(tags.gps)) {
-                            const val = tag.description || tag.value;
+                            const isBinary = tag.value instanceof Uint8Array || tag.value instanceof ArrayBuffer || (Array.isArray(tag.value) && tag.value.length > 30);
+                            const val = tag.description || (isBinary ? '[Binary Data]' : String(tag.value));
                             extractedTags[`GPS:${key}`] = val;
                             totalTags++;
                             analyzeSensitiveText(String(val || ''), key);
@@ -968,7 +1801,8 @@ async function handleFile(file) {
                             hasExtended = true;
                             extendedSection.style.display = 'block';
                             for (const [key, tag] of Object.entries(tags[type])) {
-                                const val = tag.description || tag.value;
+                                const isBinary = tag.value instanceof Uint8Array || tag.value instanceof ArrayBuffer || (Array.isArray(tag.value) && tag.value.length > 30);
+                                const val = tag.description || (isBinary ? '[Binary Data]' : String(tag.value));
                                 extractedTags[`${type.toUpperCase()}:${key}`] = val;
                                 totalTags++;
                                 analyzeSensitiveText(String(val || ''), key);
@@ -979,6 +1813,39 @@ async function handleFile(file) {
                 }
             } catch (e) {
                 console.log("No EXIF data or error reading EXIF", e);
+            }
+        } else if (isVideo || isAudio) {
+            try {
+                const isIsoBmff = ['mp4', 'm4v', 'm4a', 'mov'].includes(extLower) || inferredMime === 'video/mp4' || inferredMime === 'audio/mp4' || inferredMime === 'video/quicktime';
+                if (isIsoBmff) {
+                    const buffer = await file.arrayBuffer();
+                    const parsedMedia = parseMp4Metadata(buffer, file.size);
+                    if (parsedMedia.found) {
+                        hasContainerMetadata = true;
+                        hasExtended = true;
+                        parsedMedia.structure.forEach(entry => {
+                            addInfoRow(structureGrid, entry.label, entry.value);
+                        });
+                        if (parsedMedia.metadata.length > 0) {
+                            extendedSection.style.display = 'block';
+                            parsedMedia.metadata.forEach(entry => {
+                                extractedTags[`MP4:${entry.label}`] = entry.value;
+                                totalTags++;
+                                analyzeSensitiveText(String(entry.value || ''), entry.label);
+                                let valueClass = '';
+                                if (/comment|artist|author|copyright|description|encoder/i.test(entry.label)) {
+                                    score -= 0.4;
+                                    valueClass = /comment|artist|author|copyright/i.test(entry.label) ? 'warning' : '';
+                                }
+                                addInfoRow(extendedGrid, `[MP4] ${entry.label}`, entry.value, valueClass);
+                            });
+                        }
+                        rawGrid.textContent = JSON.stringify(parsedMedia.raw, null, 2);
+                        rawSection.style.display = 'block';
+                    }
+                }
+            } catch (e) {
+                console.log('Error reading MP4/MOV metadata', e);
             }
         } else if (isPdf) {
             try {
@@ -1073,12 +1940,11 @@ async function handleFile(file) {
             score -= sensitiveFindings.reduce((acc, finding) => acc + finding.penalty, 0);
 
             for (const [label, values] of Object.entries(groupedFindings)) {
-                values.slice(0, 5).forEach(value => {
-                    addInfoRow(contentGrid, label, value, 'sensitive');
+                const uniqueValues = [...new Set(values.map(value => String(value).trim()).filter(Boolean))];
+                addInfoRow(contentGrid, `${label} detectado`, formatFindingsSummary(uniqueValues), 'warning');
+                uniqueValues.slice(0, 5).forEach((value, index) => {
+                    addInfoRow(contentGrid, `${label} ${index + 1}`, value, 'sensitive');
                 });
-                if (values.length > 5) {
-                    addInfoRow(contentGrid, `${label} (Otros)`, `+${values.length - 5} encontrados`, 'warning');
-                }
             }
         }
         
@@ -1114,7 +1980,7 @@ async function handleFile(file) {
         
         animateScore(score);
         
-        if (!hasExif && !hasGeo && !hasExtended && !hasSensitive) {
+        if (!hasExif && !hasGeo && !hasExtended && !hasContainerMetadata && !hasSensitive) {
             noMetadataMsg.style.display = 'flex';
             setPrivacyStatus('success', 'check_circle', 'Archivo limpio (Sin datos sensibles)');
         } else {
@@ -1200,11 +2066,14 @@ btnClean.addEventListener('click', async () => {
     const interval = setInterval(() => {
         progress += Math.random() * 15;
         if (progress > 90) progress = 90;
-        progressFill.style.width = `${progress}%`;
+        progressFill.style.transform = `scaleX(${progress / 100})`;
     }, 100);
     
     try {
+        const currentExt = (currentFile.name.split('.').pop() || '').toLowerCase();
+        const currentMime = currentFile.type || inferMimeType(currentExt);
         const isJpeg = currentFile.type === 'image/jpeg' || currentFile.type === 'image/jpg';
+        const isIsoBmff = isIsoBmffMedia(currentExt, currentMime);
         
         if (isJpeg) {
             const arrayBuffer = await currentFile.arrayBuffer();
@@ -1221,7 +2090,7 @@ btnClean.addEventListener('click', async () => {
             const blob = new Blob([finalData], { type: 'image/jpeg' });
 
             clearInterval(interval);
-            progressFill.style.width = '100%';
+            progressFill.style.transform = 'scaleX(1)';
 
             cleanHash = await calculateSHA512(blob);
             const cleanHash256 = await calculateSHA256(blob);
@@ -1230,11 +2099,18 @@ btnClean.addEventListener('click', async () => {
 
             const finalVerification = verifyCleanJpeg(finalData.buffer);
 
-            setTimeout(() => {
+            setTimeout(async () => {
                 cleanSize = blob.size;
                 cleanBlobUrl = URL.createObjectURL(blob);
 
                 cleaningProgress.style.display = 'none';
+                await renderFilePreview(blob, {
+                    name: currentFile.name,
+                    extLower: (currentFile.name.split('.').pop() || '').toLowerCase(),
+                    mimeType: blob.type || currentFile.type,
+                    category: getFileCategory(currentFile, (currentFile.name.split('.').pop() || '').toLowerCase(), blob.type || currentFile.type || inferMimeType((currentFile.name.split('.').pop() || '').toLowerCase()))
+                });
+                setFileHeader(getFileCategory(currentFile, (currentFile.name.split('.').pop() || '').toLowerCase(), blob.type || currentFile.type || inferMimeType((currentFile.name.split('.').pop() || '').toLowerCase())), 'Vista del archivo limpio');
 
                 if (finalVerification.clean) {
                     setPrivacyStatus('success', 'verified_user', 'Metadata eliminada y verificada ✔');
@@ -1245,15 +2121,15 @@ btnClean.addEventListener('click', async () => {
                 resultSection.style.display = 'block';
                 resultStats.innerHTML = `
                     <div class="stat-item">
-                        <span class="stat-label">Original Size</span>
+                        <span class="stat-label">Tamaño original</span>
                         <span class="stat-value strike">${formatBytes(originalSize)}</span>
                     </div>
                     <div class="stat-item">
-                        <span class="stat-label">Clean Size</span>
+                        <span class="stat-label">Tamaño limpio</span>
                         <span class="stat-value new">${formatBytes(cleanSize)}</span>
                     </div>
                     <div class="stat-item">
-                        <span class="stat-label">Saved</span>
+                        <span class="stat-label">Ahorrado</span>
                         <span class="stat-value">${formatBytes(originalSize - cleanSize)}</span>
                     </div>
                     <div class="stat-item" style="grid-column: 1 / -1; margin-top: 8px;">
@@ -1261,19 +2137,19 @@ btnClean.addEventListener('click', async () => {
                         <span class="stat-value ${finalVerification.clean ? 'new' : 'sensitive'}">${finalVerification.clean ? 'LIMPIO ✔' : 'Restos: ' + finalVerification.remaining.join(', ')}</span>
                     </div>
                     <div class="stat-item" style="grid-column: 1 / -1; margin-top: 8px;">
-                        <span class="stat-label">Clean CRC32</span>
+                        <span class="stat-label">CRC32 limpio</span>
                         <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHashCRC32}</span>
                     </div>
                     <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;">
-                        <span class="stat-label">Clean MD5</span>
+                        <span class="stat-label">MD5 limpio</span>
                         <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHashMD5}</span>
                     </div>
                     <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;">
-                        <span class="stat-label">Clean SHA-256</span>
+                        <span class="stat-label">SHA-256 limpio</span>
                         <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHash256}</span>
                     </div>
                     <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;">
-                        <span class="stat-label">Clean SHA-512</span>
+                        <span class="stat-label">SHA-512 limpio</span>
                         <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHash}</span>
                     </div>
                 `;
@@ -1285,7 +2161,7 @@ btnClean.addEventListener('click', async () => {
                 resultSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
             }, 400);
             
-        } else {
+        } else if (currentMime.startsWith('image/')) {
             // Fallback para otras imágenes usando Canvas
             const img = new Image();
             img.src = URL.createObjectURL(currentFile);
@@ -1307,18 +2183,25 @@ btnClean.addEventListener('click', async () => {
             
             canvas.toBlob(async (blob) => {
                 clearInterval(interval);
-                progressFill.style.width = '100%';
+                progressFill.style.transform = 'scaleX(1)';
                 
                 cleanHash = await calculateSHA512(blob);
                 const cleanHash256 = await calculateSHA256(blob);
                 const cleanHashMD5 = await calculateMD5(blob);
                 const cleanHashCRC32 = await calculateCRC32(blob);
                 
-                setTimeout(() => {
+                setTimeout(async () => {
                     cleanSize = blob.size;
                     cleanBlobUrl = URL.createObjectURL(blob);
                     
                     cleaningProgress.style.display = 'none';
+                    await renderFilePreview(blob, {
+                        name: currentFile.name,
+                        extLower: (currentFile.name.split('.').pop() || '').toLowerCase(),
+                        mimeType: blob.type || currentFile.type,
+                        category: getFileCategory(currentFile, (currentFile.name.split('.').pop() || '').toLowerCase(), blob.type || currentFile.type || inferMimeType((currentFile.name.split('.').pop() || '').toLowerCase()))
+                    });
+                    setFileHeader(getFileCategory(currentFile, (currentFile.name.split('.').pop() || '').toLowerCase(), blob.type || currentFile.type || inferMimeType((currentFile.name.split('.').pop() || '').toLowerCase())), 'Vista del archivo limpio');
                     setPrivacyStatus('success', 'verified_user', 'Metadata eliminada');
                     
                     resultSection.style.display = 'block';
@@ -1360,14 +2243,87 @@ btnClean.addEventListener('click', async () => {
                     resultSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
                 }, 400);
             }, type, quality);
+        } else if (isIsoBmff) {
+            const arrayBuffer = await currentFile.arrayBuffer();
+            const cleanedData = stripMp4Metadata(arrayBuffer);
+            const verification = parseMp4Metadata(cleanedData.buffer, cleanedData.byteLength);
+            const blob = new Blob([cleanedData], { type: currentMime || 'video/mp4' });
+
+            clearInterval(interval);
+            progressFill.style.transform = 'scaleX(1)';
+
+            cleanHash = await calculateSHA512(blob);
+            const cleanHash256 = await calculateSHA256(blob);
+            const cleanHashMD5 = await calculateMD5(blob);
+            const cleanHashCRC32 = await calculateCRC32(blob);
+
+            setTimeout(async () => {
+                cleanSize = blob.size;
+                if (cleanBlobUrl) URL.revokeObjectURL(cleanBlobUrl);
+                cleanBlobUrl = URL.createObjectURL(blob);
+
+                cleaningProgress.style.display = 'none';
+                await renderFilePreview(blob, {
+                    name: currentFile.name,
+                    extLower: currentExt,
+                    mimeType: blob.type || currentMime,
+                    category: getFileCategory(currentFile, currentExt, blob.type || currentMime)
+                });
+                setFileHeader(getFileCategory(currentFile, currentExt, blob.type || currentMime), 'Vista del archivo limpio');
+                setPrivacyStatus(verification.metadata.length === 0 ? 'success' : 'warning', verification.metadata.length === 0 ? 'verified_user' : 'gpp_maybe', verification.metadata.length === 0 ? 'Metadata MP4 eliminada ✔' : 'Limpieza parcial de metadata MP4');
+
+                resultSection.style.display = 'block';
+                resultStats.innerHTML = `
+                    <div class="stat-item">
+                        <span class="stat-label">Tamaño original</span>
+                        <span class="stat-value strike">${formatBytes(originalSize)}</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Tamaño limpio</span>
+                        <span class="stat-value new">${formatBytes(cleanSize)}</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Ahorrado</span>
+                        <span class="stat-value">${formatBytes(originalSize - cleanSize)}</span>
+                    </div>
+                    <div class="stat-item" style="grid-column: 1 / -1; margin-top: 8px;">
+                        <span class="stat-label">Verificación</span>
+                        <span class="stat-value ${verification.metadata.length === 0 ? 'new' : 'warning'}">${verification.metadata.length === 0 ? 'Sin atoms descriptivos residuales ✔' : 'Quedan ' + verification.metadata.length + ' campos descriptivos'}</span>
+                    </div>
+                    <div class="stat-item" style="grid-column: 1 / -1; margin-top: 8px;">
+                        <span class="stat-label">CRC32 limpio</span>
+                        <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHashCRC32}</span>
+                    </div>
+                    <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;">
+                        <span class="stat-label">MD5 limpio</span>
+                        <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHashMD5}</span>
+                    </div>
+                    <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;">
+                        <span class="stat-label">SHA-256 limpio</span>
+                        <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHash256}</span>
+                    </div>
+                    <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;">
+                        <span class="stat-label">SHA-512 limpio</span>
+                        <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHash}</span>
+                    </div>
+                `;
+
+                const removedKeys = Object.keys(extractedTags);
+                showDiffs(removedKeys);
+                saveState(blob, removedKeys, 'full');
+
+                resultSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }, 400);
+        } else {
+            throw new Error('Formato no compatible con la limpieza local');
         }
         
     } catch (error) {
         clearInterval(interval);
         console.error(error);
-        alert("Error al limpiar la imagen. Asegúrate de que sea un formato de imagen válido.");
+        alert("Error al limpiar el archivo. Verifica que sea una imagen o un MP4/MOV/M4A compatible.");
         btnClean.style.display = 'inline-flex';
-        if (typeof btnSelectiveClean !== 'undefined') btnSelectiveClean.style.display = 'inline-flex';
+        if (typeof btnSelectiveClean !== 'undefined') btnSelectiveClean.style.display = canSelectiveCleanMetadata(currentFile, (currentFile.name.split('.').pop() || '').toLowerCase(), currentFile.type || inferMimeType((currentFile.name.split('.').pop() || '').toLowerCase())) ? 'inline-flex' : 'none';
         cleaningProgress.style.display = 'none';
     }
 });
@@ -1417,7 +2373,7 @@ function stripAllJpegMetadata(arrayBuffer) {
     if (!markers) return null;
     const keep = markers.filter(seg => {
         if (seg.marker === 0xD8) return true;
-        if (seg.marker === 0xE0) return true;
+        if (seg.marker === 0xE0) return false;
         if (seg.marker >= 0xE1 && seg.marker <= 0xEF) return false;
         if (seg.marker === 0xFE) return false;
         return true;
@@ -1470,6 +2426,7 @@ function verifyCleanJpeg(arrayBuffer) {
     if (!markers) return { clean: false, remaining: ['Error parsing JPEG'] };
     const remaining = [];
     markers.forEach(seg => {
+        if (seg.marker === 0xE0) remaining.push('JFIF');
         if (seg.marker >= 0xE1 && seg.marker <= 0xEF) {
             const sd = data.subarray(seg.start, seg.end);
             if (seg.marker === 0xE1 && sd.length >= 10 && matchBytes(sd, 4, "Exif\x00\x00")) remaining.push('EXIF');
@@ -1506,7 +2463,7 @@ btnSelectiveClean.addEventListener('click', async () => {
     const interval = setInterval(() => {
         progress += Math.random() * 15;
         if (progress > 90) progress = 90;
-        progressFill.style.width = `${progress}%`;
+        progressFill.style.transform = `scaleX(${progress / 100})`;
     }, 100);
     
     try {
@@ -1564,7 +2521,7 @@ btnSelectiveClean.addEventListener('click', async () => {
             const blob = new Blob([cleanedData], { type: 'image/jpeg' });
 
             clearInterval(interval);
-            progressFill.style.width = '100%';
+            progressFill.style.transform = 'scaleX(1)';
 
             cleanHash = await calculateSHA512(blob);
             const cleanHash256 = await calculateSHA256(blob);
@@ -1572,10 +2529,17 @@ btnSelectiveClean.addEventListener('click', async () => {
             const cleanHashCRC32 = await calculateCRC32(blob);
             const finalVerification = verifyCleanJpeg(cleanedData.buffer);
 
-            setTimeout(() => {
+            setTimeout(async () => {
                 cleanSize = blob.size;
                 cleanBlobUrl = URL.createObjectURL(blob);
                 cleaningProgress.style.display = 'none';
+                await renderFilePreview(blob, {
+                    name: currentFile.name,
+                    extLower: (currentFile.name.split('.').pop() || '').toLowerCase(),
+                    mimeType: blob.type || currentFile.type,
+                    category: getFileCategory(currentFile, (currentFile.name.split('.').pop() || '').toLowerCase(), blob.type || currentFile.type || inferMimeType((currentFile.name.split('.').pop() || '').toLowerCase()))
+                });
+                setFileHeader(getFileCategory(currentFile, (currentFile.name.split('.').pop() || '').toLowerCase(), blob.type || currentFile.type || inferMimeType((currentFile.name.split('.').pop() || '').toLowerCase())), 'Vista del archivo limpio');
                 if (finalVerification.clean) {
                     setPrivacyStatus('success', 'verified_user', 'Toda la metadata eliminada y verificada ✔');
                 } else {
@@ -1694,7 +2658,7 @@ btnSelectiveClean.addEventListener('click', async () => {
         const blob = new Blob([new Uint8Array(workingBuffer)], { type: 'image/jpeg' });
 
         clearInterval(interval);
-        progressFill.style.width = '100%';
+        progressFill.style.transform = 'scaleX(1)';
 
         cleanHash = await calculateSHA512(blob);
         const cleanHash256 = await calculateSHA256(blob);
@@ -1702,11 +2666,18 @@ btnSelectiveClean.addEventListener('click', async () => {
         const cleanHashCRC32 = await calculateCRC32(blob);
         const selectiveVerification = verifyCleanJpeg(workingBuffer);
 
-        setTimeout(() => {
+        setTimeout(async () => {
             cleanSize = blob.size;
             cleanBlobUrl = URL.createObjectURL(blob);
 
             cleaningProgress.style.display = 'none';
+            await renderFilePreview(blob, {
+                name: currentFile.name,
+                extLower: (currentFile.name.split('.').pop() || '').toLowerCase(),
+                mimeType: blob.type || currentFile.type,
+                category: getFileCategory(currentFile, (currentFile.name.split('.').pop() || '').toLowerCase(), blob.type || currentFile.type || inferMimeType((currentFile.name.split('.').pop() || '').toLowerCase()))
+            });
+            setFileHeader(getFileCategory(currentFile, (currentFile.name.split('.').pop() || '').toLowerCase(), blob.type || currentFile.type || inferMimeType((currentFile.name.split('.').pop() || '').toLowerCase())), 'Vista del archivo limpio');
 
             if (selectiveVerification.remaining.length === 0 && (removeExif || allExifChecked)) {
                 setPrivacyStatus('success', 'verified_user', 'Metadata seleccionada eliminada y verificada ✔');
