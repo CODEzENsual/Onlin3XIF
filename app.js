@@ -914,35 +914,54 @@ function formatBytes(bytes, decimals = 2) {
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
 }
 
-async function calculateHash(blob, algorithm = 'SHA-512') {
+async function calculateSHA512(blob) {
     try {
-        if (!window.crypto || !window.crypto.subtle) {
-            return "No disponible (requiere HTTPS)";
+        if (typeof CryptoJS === 'undefined') return "Librería no cargada";
+        const algo = CryptoJS.algo.SHA512.create();
+        const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunk
+        for (let offset = 0; offset < blob.size; offset += CHUNK_SIZE) {
+            const chunk = blob.slice(offset, offset + CHUNK_SIZE);
+            const buffer = await chunk.arrayBuffer();
+            const wordArray = CryptoJS.lib.WordArray.create(buffer);
+            algo.update(wordArray);
         }
-        const buffer = await blob.arrayBuffer();
-        const hashBuffer = await crypto.subtle.digest(algorithm, buffer);
-        const hashArray = Array.from(new Uint8Array(hashBuffer));
-        return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        return algo.finalize().toString();
     } catch (err) {
-        console.error(`Error hashing ${algorithm}:`, err);
+        console.error("Error hashing SHA-512:", err);
         return "Error al calcular hash";
     }
 }
 
-async function calculateSHA512(blob) {
-    return calculateHash(blob, 'SHA-512');
-}
-
 async function calculateSHA256(blob) {
-    return calculateHash(blob, 'SHA-256');
+    try {
+        if (typeof CryptoJS === 'undefined') return "Librería no cargada";
+        const algo = CryptoJS.algo.SHA256.create();
+        const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunk
+        for (let offset = 0; offset < blob.size; offset += CHUNK_SIZE) {
+            const chunk = blob.slice(offset, offset + CHUNK_SIZE);
+            const buffer = await chunk.arrayBuffer();
+            const wordArray = CryptoJS.lib.WordArray.create(buffer);
+            algo.update(wordArray);
+        }
+        return algo.finalize().toString();
+    } catch (err) {
+        console.error("Error hashing SHA-256:", err);
+        return "Error al calcular hash";
+    }
 }
 
 async function calculateMD5(blob) {
     try {
         if (typeof CryptoJS === 'undefined') return "Librería no cargada";
-        const buffer = await blob.arrayBuffer();
-        const wordArray = CryptoJS.lib.WordArray.create(buffer);
-        return CryptoJS.MD5(wordArray).toString();
+        const algo = CryptoJS.algo.MD5.create();
+        const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunk
+        for (let offset = 0; offset < blob.size; offset += CHUNK_SIZE) {
+            const chunk = blob.slice(offset, offset + CHUNK_SIZE);
+            const buffer = await chunk.arrayBuffer();
+            const wordArray = CryptoJS.lib.WordArray.create(buffer);
+            algo.update(wordArray);
+        }
+        return algo.finalize().toString();
     } catch (err) {
         console.error("Error hashing MD5:", err);
         return "Error al calcular hash";
@@ -951,11 +970,15 @@ async function calculateMD5(blob) {
 
 async function calculateCRC32(blob) {
     try {
-        const buffer = await blob.arrayBuffer();
-        const view = new Uint8Array(buffer);
         let crc = 0 ^ (-1);
-        for (let i = 0; i < view.length; i++) {
-            crc = (crc >>> 8) ^ crcTable[(crc ^ view[i]) & 0xFF];
+        const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunk
+        for (let offset = 0; offset < blob.size; offset += CHUNK_SIZE) {
+            const chunk = blob.slice(offset, offset + CHUNK_SIZE);
+            const buffer = await chunk.arrayBuffer();
+            const view = new Uint8Array(buffer);
+            for (let i = 0; i < view.length; i++) {
+                crc = (crc >>> 8) ^ crcTable[(crc ^ view[i]) & 0xFF];
+            }
         }
         return (crc ^ (-1)) >>> 0;
     } catch (err) {
@@ -1886,36 +1909,48 @@ async function handleFile(file) {
                 const isMatroska = ['mkv', 'mka', 'mks'].includes(extLower) || /matroska/i.test(inferredMime);
                 
                 if (isIsoBmff) {
-                    const buffer = await file.arrayBuffer();
-                    const parsedMedia = parseMp4Metadata(buffer, file.size);
-                    if (parsedMedia.found) {
-                        hasContainerMetadata = true;
-                        hasExtended = true;
-                        parsedMedia.structure.forEach(entry => {
-                            addInfoRow(structureGrid, entry.label, entry.value);
-                        });
-                        if (parsedMedia.metadata.length > 0) {
-                            extendedSection.style.display = 'block';
-                            parsedMedia.metadata.forEach(entry => {
-                                extractedTags[`MP4:${entry.label}`] = entry.value;
-                                totalTags++;
-                                analyzeSensitiveText(String(entry.value || ''), entry.label);
-                                let valueClass = '';
-                                if (/comment|artist|author|copyright|description|encoder/i.test(entry.label)) {
-                                    score -= 0.4;
-                                    valueClass = /comment|artist|author|copyright/i.test(entry.label) ? 'warning' : '';
-                                }
-                                addInfoRow(extendedGrid, `[MP4] ${entry.label}`, entry.value, valueClass);
-                            });
+                    try {
+                        const MAX_MEM = 500 * 1024 * 1024; // 500MB limite seguro para no reventar memoria
+                        let buffer;
+                        if (file.size > MAX_MEM) {
+                            console.warn("Archivo muy grande, leyendo solo los primeros 50MB para metadatos");
+                            buffer = await file.slice(0, 50 * 1024 * 1024).arrayBuffer();
+                        } else {
+                            buffer = await file.arrayBuffer();
                         }
-                        rawGrid.textContent = JSON.stringify(parsedMedia.raw, null, 2);
-                        rawSection.style.display = 'block';
+                        const parsedMedia = parseMp4Metadata(buffer, file.size);
+                        if (parsedMedia.found) {
+                            hasContainerMetadata = true;
+                            hasExtended = true;
+                            parsedMedia.structure.forEach(entry => {
+                                addInfoRow(structureGrid, entry.label, entry.value);
+                            });
+                            if (parsedMedia.metadata.length > 0) {
+                                extendedSection.style.display = 'block';
+                                parsedMedia.metadata.forEach(entry => {
+                                    extractedTags[`MP4:${entry.label}`] = entry.value;
+                                    totalTags++;
+                                    analyzeSensitiveText(String(entry.value || ''), entry.label);
+                                    let valueClass = '';
+                                    if (/comment|artist|author|copyright|description|encoder/i.test(entry.label)) {
+                                        score -= 0.4;
+                                        valueClass = /comment|artist|author|copyright/i.test(entry.label) ? 'warning' : '';
+                                    }
+                                    addInfoRow(extendedGrid, `[MP4] ${entry.label}`, entry.value, valueClass);
+                                });
+                            }
+                            rawGrid.textContent = JSON.stringify(parsedMedia.raw, null, 2);
+                            rawSection.style.display = 'block';
+                        }
+                    } catch (memErr) {
+                        console.error('Error de memoria o parseo en MP4:', memErr);
+                        addInfoRow(structureGrid, 'Error', 'El archivo es demasiado grande o complejo para analizar todos sus metadatos internos en el navegador.');
                     }
                 } else if (isWebM) {
                     // Análisis básico de WebM
                     try {
-                        // WebM usa EBML (Event-based Binary Machine Language)
-                        const view = new DataView(buffer);
+                        const headerBuffer = await file.slice(0, 1024).arrayBuffer();
+                        const view = new DataView(headerBuffer);
                         if (view.byteLength >= 4 && view.getUint8(0) === 0x1A && view.getUint8(1) === 0x45 && view.getUint8(2) === 0xDF && view.getUint8(3) === 0xA3) {
                             addInfoRow(structureGrid, 'Formato contenedor', 'WebM/EBML ✓ válido');
                             hasContainerMetadata = true;
@@ -1926,7 +1961,8 @@ async function handleFile(file) {
                 } else if (isMatroska) {
                     // Análisis básico de Matroska
                     try {
-                        const view = new DataView(buffer);
+                        const headerBuffer = await file.slice(0, 1024).arrayBuffer();
+                        const view = new DataView(headerBuffer);
                         if (view.byteLength >= 4 && view.getUint8(0) === 0x1A && view.getUint8(1) === 0x45 && view.getUint8(2) === 0xDF && view.getUint8(3) === 0xA3) {
                             addInfoRow(structureGrid, 'Formato contenedor', 'Matroska/EBML ✓ válido');
                             hasContainerMetadata = true;
@@ -2438,35 +2474,44 @@ btnClean.addEventListener('click', async () => {
                 }, 400);
             }, type, quality);
         } else if (isIsoBmff) {
-            const arrayBuffer = await currentFile.arrayBuffer();
-            const cleanedData = stripMp4Metadata(arrayBuffer);
-            const verification = parseMp4Metadata(cleanedData.buffer, cleanedData.byteLength);
-            const blob = new Blob([cleanedData], { type: currentMime || 'video/mp4' });
-
-            clearInterval(interval);
-            progressFill.style.transform = 'scaleX(1)';
-
-            cleanHash = await calculateSHA512(blob);
-            const cleanHash256 = await calculateSHA256(blob);
-            const cleanHashMD5 = await calculateMD5(blob);
-            const cleanHashCRC32 = await calculateCRC32(blob);
-
-            setTimeout(async () => {
-                cleanSize = blob.size;
-                if (cleanBlobUrl) URL.revokeObjectURL(cleanBlobUrl);
-                cleanBlobUrl = URL.createObjectURL(blob);
-
+            const MAX_MEM_CLEAN = 300 * 1024 * 1024; // 300MB
+            if (currentFile.size > MAX_MEM_CLEAN) {
+                clearInterval(interval);
                 cleaningProgress.style.display = 'none';
-                await renderFilePreview(blob, {
-                    name: currentFile.name,
-                    extLower: currentExt,
-                    mimeType: blob.type || currentMime,
-                    category: getFileCategory(currentFile, currentExt, blob.type || currentMime)
-                });
-                setFileHeader(getFileCategory(currentFile, currentExt, blob.type || currentMime), 'Vista del archivo limpio');
-                setPrivacyStatus(verification.metadata.length === 0 ? 'success' : 'warning', verification.metadata.length === 0 ? 'verified_user' : 'gpp_maybe', verification.metadata.length === 0 ? 'Metadata MP4 eliminada ✔' : 'Limpieza parcial de metadata MP4');
+                btnClean.style.display = 'inline-flex';
+                alert('El archivo de vídeo es demasiado grande (' + formatBytes(currentFile.size) + ') para limpiarlo en el navegador. (Límite ' + formatBytes(MAX_MEM_CLEAN) + ')');
+                return;
+            }
+            try {
+                const arrayBuffer = await currentFile.arrayBuffer();
+                const cleanedData = stripMp4Metadata(arrayBuffer);
+                const verification = parseMp4Metadata(cleanedData.buffer, cleanedData.byteLength);
+                const blob = new Blob([cleanedData], { type: currentMime || 'video/mp4' });
 
-                resultSection.style.display = 'block';
+                clearInterval(interval);
+                progressFill.style.transform = 'scaleX(1)';
+
+                cleanHash = await calculateSHA512(blob);
+                const cleanHash256 = await calculateSHA256(blob);
+                const cleanHashMD5 = await calculateMD5(blob);
+                const cleanHashCRC32 = await calculateCRC32(blob);
+
+                setTimeout(async () => {
+                    cleanSize = blob.size;
+                    if (cleanBlobUrl) URL.revokeObjectURL(cleanBlobUrl);
+                    cleanBlobUrl = URL.createObjectURL(blob);
+
+                    cleaningProgress.style.display = 'none';
+                    await renderFilePreview(blob, {
+                        name: currentFile.name,
+                        extLower: currentExt,
+                        mimeType: blob.type || currentMime,
+                        category: getFileCategory(currentFile, currentExt, blob.type || currentMime)
+                    });
+                    setFileHeader(getFileCategory(currentFile, currentExt, blob.type || currentMime), 'Vista del archivo limpio');
+                    setPrivacyStatus(verification.metadata.length === 0 ? 'success' : 'warning', verification.metadata.length === 0 ? 'verified_user' : 'gpp_maybe', verification.metadata.length === 0 ? 'Metadata MP4 eliminada ✔' : 'Limpieza parcial de metadata MP4');
+
+                    resultSection.style.display = 'block';
                 resultStats.innerHTML = `
                     <div class="stat-item">
                         <span class="stat-label">Tamaño original</span>
