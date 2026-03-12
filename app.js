@@ -915,15 +915,23 @@ function formatBytes(bytes, decimals = 2) {
 }
 
 async function calculateSHA512(blob) {
+    if (blob.size > 200 * 1024 * 1024) return "Omitido (muy pesado para el móvil)";
     try {
+        if (blob.size <= 30 * 1024 * 1024 && window.crypto && window.crypto.subtle) {
+            const buffer = await blob.arrayBuffer();
+            const hashBuffer = await crypto.subtle.digest('SHA-512', buffer);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        }
         if (typeof CryptoJS === 'undefined') return "Librería no cargada";
         const algo = CryptoJS.algo.SHA512.create();
-        const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunk
+        const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunk para mejor memoria RAM en móviles
         for (let offset = 0; offset < blob.size; offset += CHUNK_SIZE) {
             const chunk = blob.slice(offset, offset + CHUNK_SIZE);
             const buffer = await chunk.arrayBuffer();
             const wordArray = CryptoJS.lib.WordArray.create(buffer);
             algo.update(wordArray);
+            await new Promise(resolve => setTimeout(resolve, 5)); // Liberar el hilo principal
         }
         return algo.finalize().toString();
     } catch (err) {
@@ -933,15 +941,23 @@ async function calculateSHA512(blob) {
 }
 
 async function calculateSHA256(blob) {
+    if (blob.size > 200 * 1024 * 1024) return "Omitido (muy pesado para el móvil)";
     try {
+        if (blob.size <= 30 * 1024 * 1024 && window.crypto && window.crypto.subtle) {
+            const buffer = await blob.arrayBuffer();
+            const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        }
         if (typeof CryptoJS === 'undefined') return "Librería no cargada";
         const algo = CryptoJS.algo.SHA256.create();
-        const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunk
+        const CHUNK_SIZE = 5 * 1024 * 1024;
         for (let offset = 0; offset < blob.size; offset += CHUNK_SIZE) {
             const chunk = blob.slice(offset, offset + CHUNK_SIZE);
             const buffer = await chunk.arrayBuffer();
             const wordArray = CryptoJS.lib.WordArray.create(buffer);
             algo.update(wordArray);
+            await new Promise(resolve => setTimeout(resolve, 5)); // Liberar el hilo
         }
         return algo.finalize().toString();
     } catch (err) {
@@ -951,15 +967,17 @@ async function calculateSHA256(blob) {
 }
 
 async function calculateMD5(blob) {
+    if (blob.size > 200 * 1024 * 1024) return "Omitido (muy pesado para el móvil)";
     try {
         if (typeof CryptoJS === 'undefined') return "Librería no cargada";
         const algo = CryptoJS.algo.MD5.create();
-        const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunk
+        const CHUNK_SIZE = 5 * 1024 * 1024;
         for (let offset = 0; offset < blob.size; offset += CHUNK_SIZE) {
             const chunk = blob.slice(offset, offset + CHUNK_SIZE);
             const buffer = await chunk.arrayBuffer();
             const wordArray = CryptoJS.lib.WordArray.create(buffer);
             algo.update(wordArray);
+            await new Promise(resolve => setTimeout(resolve, 5)); // Evita crasheos de pestaña
         }
         return algo.finalize().toString();
     } catch (err) {
@@ -969,9 +987,10 @@ async function calculateMD5(blob) {
 }
 
 async function calculateCRC32(blob) {
+    if (blob.size > 200 * 1024 * 1024) return "Omitido";
     try {
         let crc = 0 ^ (-1);
-        const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunk
+        const CHUNK_SIZE = 5 * 1024 * 1024;
         for (let offset = 0; offset < blob.size; offset += CHUNK_SIZE) {
             const chunk = blob.slice(offset, offset + CHUNK_SIZE);
             const buffer = await chunk.arrayBuffer();
@@ -979,6 +998,7 @@ async function calculateCRC32(blob) {
             for (let i = 0; i < view.length; i++) {
                 crc = (crc >>> 8) ^ crcTable[(crc ^ view[i]) & 0xFF];
             }
+            if (offset % (15 * 1024 * 1024) === 0) await new Promise(resolve => setTimeout(resolve, 5));
         }
         return (crc ^ (-1)) >>> 0;
     } catch (err) {
@@ -1626,6 +1646,12 @@ async function handleFile(file) {
         const isDocx = inferredMime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
         const isText = isTextLikeFile(file, extLower);
         
+        // Prevención de OOM (Out of Memory) general en móviles
+        const MAX_TOTAL_SIZE = 500 * 1024 * 1024; // 500MB absoluto max handling sin webworkers
+        if (file.size > MAX_TOTAL_SIZE) {
+            alert('El archivo es demasiado grande (' + formatBytes(file.size) + ') para procesarse completamente de forma local en el navegador.');
+        }
+        
         dropZone.classList.add('compact');
         inspectionPanel.style.display = 'flex';
         resultSection.style.display = 'none';
@@ -1817,7 +1843,13 @@ async function handleFile(file) {
         // EXIF Analysis (only for images)
         if (isImage) {
             try {
-                const buffer = await file.arrayBuffer();
+                let buffer;
+                if (file.size > 20 * 1024 * 1024) { // Only read the first 20MB for EXIF header to save memory
+                    buffer = await file.slice(0, 20 * 1024 * 1024).arrayBuffer();
+                } else {
+                    buffer = await file.arrayBuffer();
+                }
+                
                 if (typeof ExifReader === 'undefined') {
                     console.warn('⚠️ ExifReader no cargó correctamente - omitiendo análisis EXIF');
                 } else {
@@ -1982,10 +2014,20 @@ async function handleFile(file) {
                 if (typeof pdfjsLib === 'undefined') {
                     console.warn('⚠️ pdfjsLib no cargó - omitiendo análisis PDF avanzado');
                 } else {
+                    const MAX_PDF_MEM = 50 * 1024 * 1024; // Limit PDF reading memory
                     pdfjsLib.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.js';
-                    const arrayBuffer = await file.arrayBuffer();
-                    const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+                    let pdfData;
+                    if (file.size > MAX_PDF_MEM) {
+                         const fileUrl = URL.createObjectURL(file);
+                         pdfData = { url: fileUrl };
+                    } else {
+                         pdfData = { data: await file.arrayBuffer() };
+                    }
+
+                    const pdf = await pdfjsLib.getDocument(pdfData).promise;
                     const metadata = await pdf.getMetadata();
+                    
+                    if (file.size > MAX_PDF_MEM && pdfData.url) URL.revokeObjectURL(pdfData.url);
                     
                     addInfoRow(structureGrid, 'Total de páginas', String(pdf.numPages));
                     
@@ -2306,6 +2348,13 @@ btnClean.addEventListener('click', async () => {
         const isIsoBmff = isIsoBmffMedia(currentExt, currentMime);
         
         if (isJpeg) {
+            if (currentFile.size > 100 * 1024 * 1024) {
+                clearInterval(interval);
+                cleaningProgress.style.display = 'none';
+                btnClean.style.display = 'inline-flex';
+                alert('El archivo de imagen es excepcionalmente grande para limpiar metadatos en móvil.');
+                return;
+            }
             const arrayBuffer = await currentFile.arrayBuffer();
             const cleanedData = stripAllJpegMetadata(arrayBuffer);
             if (!cleanedData) throw new Error('Error procesando JPEG');
@@ -2400,13 +2449,25 @@ btnClean.addEventListener('click', async () => {
                 img.onload = resolve;
                 img.onerror = () => reject(new Error("No se pudo cargar la imagen para limpiar"));
             });
+
+            // Prevent mobile Canvas OOM (Out Of Memory)
+            const MAX_DIM = window.innerWidth <= 768 ? 2048 : 4096;
+            let targetWidth = img.width;
+            let targetHeight = img.height;
+            
+            if (targetWidth > MAX_DIM || targetHeight > MAX_DIM) {
+                const ratio = Math.min(MAX_DIM / targetWidth, MAX_DIM / targetHeight);
+                targetWidth = Math.floor(targetWidth * ratio);
+                targetHeight = Math.floor(targetHeight * ratio);
+                console.warn(`Imagen muy grande escalada a ${targetWidth}x${targetHeight} por restricciones de hardware`);
+            }
             
             const canvas = document.createElement('canvas');
-            canvas.width = img.width;
-            canvas.height = img.height;
+            canvas.width = targetWidth;
+            canvas.height = targetHeight;
             
             const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0);
+            ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
             
             const type = currentFile.type || 'image/png';
             const quality = 1.0; // Máxima calidad para no perder datos
@@ -2553,6 +2614,10 @@ btnClean.addEventListener('click', async () => {
 
                 resultSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
             }, 400);
+            } catch (err) {
+                console.error("Error procesando MP4 localmente", err);
+                throw err;
+            }
         } else {
             throw new Error('Formato no compatible con la limpieza local');
         }
@@ -2706,6 +2771,15 @@ btnSelectiveClean.addEventListener('click', async () => {
     }, 100);
     
     try {
+        if (currentFile.size > 100 * 1024 * 1024) {
+            clearInterval(interval);
+            cleaningProgress.style.display = 'none';
+            btnSelectiveClean.style.display = 'inline-flex';
+            btnClean.style.display = 'inline-flex';
+            alert('El archivo es demasiado grande para limpiarse selectivamente en el navegador.');
+            return;
+        }
+
         const arrayBuffer = await currentFile.arrayBuffer();
 
         const nameToTag = {};
