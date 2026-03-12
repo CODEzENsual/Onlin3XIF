@@ -100,7 +100,7 @@ const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 's
 
 const ISO_BMFF_EXTENSIONS = new Set(['mp4', 'm4v', 'm4a', 'mov']);
 const MP4_CONTAINER_BOXES = new Set(['moov', 'trak', 'mdia', 'minf', 'stbl', 'dinf', 'edts', 'udta', 'ilst', 'meta', 'moof', 'traf', 'mfra', 'skip']);
-const MP4_REMOVABLE_BOXES = new Set(['udta']);
+const MP4_REMOVABLE_BOXES = new Set(['udta', 'uuid', 'ilst', 'xmp ']);
 
 function inferMimeType(extLower = '') {
     const ext = String(extLower || '').toLowerCase();
@@ -657,6 +657,7 @@ function isValidIPv4(value, rawText = '', matchIndex = -1) {
     const parts = String(value || '').trim().split('.');
     if (parts.length !== 4) return false;
     
+    // Si la cadena "IP" está cerca, dar más peso. Pero para no romper, simplemente comprobamos si son válidos.
     const allPartsValid = parts.every(part => {
         if (!/^\d{1,3}$/.test(part)) return false;
         const n = Number(part);
@@ -666,10 +667,9 @@ function isValidIPv4(value, rawText = '', matchIndex = -1) {
     if (!allPartsValid) return false;
 
     if (matchIndex > -1 && rawText) {
-        const prefix = rawText.substring(Math.max(0, matchIndex - 40), matchIndex).toLowerCase();
-        if (/\b(?:version|ver|v|id|length|size|type)\s*[:=]?\s*$/.test(prefix)) return false;
+        const prefix = rawText.substring(Math.max(0, matchIndex - 60), matchIndex).toLowerCase();
+        if (/\b(?:version|ver|v|id|length|size|type|build)\s*[:=]?\s*$/.test(prefix)) return false;
         
-        // Evitar falsos detectados en secuencias alfanuméricas o arrays binarios (,12,45,214, ...)
         if (/([a-f0-9,<>{}'"\\]{15,})$/i.test(prefix)) return false; 
     }
 
@@ -679,12 +679,10 @@ function isValidIPv4(value, rawText = '', matchIndex = -1) {
     const n3 = Number(parts[3]);
 
     if (n0 === 0) return false;
-
-    if (n0 <= 20 && n1 <= 20 && n2 <= 20 && n3 <= 20) {
-        const DNS_CONOCIDOS = new Set(['1.1.1.1', '8.8.8.8', '9.9.9.9', '8.8.4.4', '1.0.0.1']);
-        if (!DNS_CONOCIDOS.has(value) && n0 !== 10) {
-            return false;
-        }
+    
+    // Versiones comunes false positives
+    if (n0 <= 20 && n1 <= 20 && n2 <= 20 && n3 <= 255) {
+        return false;
     }
 
     return true;
@@ -692,8 +690,6 @@ function isValidIPv4(value, rawText = '', matchIndex = -1) {
 
 function isValidMac(value, rawText = '', matchIndex = -1) {
     if (!value) return false;
-    
-    // Evitar que detecte partes de UUID u otras tramas largas
     if (matchIndex > -1 && rawText) {
         const prefixChar = rawText.charAt(matchIndex - 1);
         const suffixChar = rawText.charAt(matchIndex + value.length);
@@ -701,6 +697,8 @@ function isValidMac(value, rawText = '', matchIndex = -1) {
             return false;
         }
     }
+    // Evitar falsos positivos como ceros consecutivos o cadenas tontas
+    if (/^(00[:-]){5}00$|^(ff[:-]){5}ff$/i.test(value)) return false;
     return true;
 }
 
@@ -782,11 +780,13 @@ function isLikelyPhone(value, rawText = '', matchIndex = -1) {
     if (/^\d{2}[-/.]\d{2}[-/.]\d{4}/.test(raw)) return false;
 
     if (matchIndex > -1 && rawText) {
-        const prefix = rawText.substring(Math.max(0, matchIndex - 40), matchIndex).toUpperCase();
+        const prefix = rawText.substring(Math.max(0, matchIndex - 60), matchIndex).toUpperCase();
         if (prefix.includes('MAINWINDOW') || prefix.includes('HDITEM') || 
             prefix.includes('VERSION') || prefix.includes('ID') || 
             prefix.includes('PRODUCT') || prefix.includes('SERIAL') || 
-            prefix.includes('LENGTH') || prefix.includes('SIZE')) {
+            prefix.includes('LENGTH') || prefix.includes('SIZE') ||
+            prefix.includes('DATE') || prefix.includes('TIME') ||
+            prefix.includes('CREATION') || prefix.includes('MODIFIED')) {
             return false;
         }
         if (/([A-F0-9,<>{}'"\\]{15,})$/i.test(prefix)) {
@@ -798,6 +798,7 @@ function isLikelyPhone(value, rawText = '', matchIndex = -1) {
     const digits = normalizeDigits(raw);
     if (digits.length < 10 || digits.length > 15) return false;
     if (/^(\d)\1+$/.test(digits)) return false;
+    if (/^012345/.test(digits) || /^123456/.test(digits)) return false;
     if (luhnCheck(digits) && digits.length >= 13) return false;
     return true;
 }
@@ -810,7 +811,7 @@ function isValidCreditCard(value, rawText = '', matchIndex = -1) {
     if (!/^[3456]/.test(digits)) return false;
 
     if (matchIndex > -1 && rawText) {
-        const prefix = rawText.substring(Math.max(0, matchIndex - 40), matchIndex).toUpperCase();
+        const prefix = rawText.substring(Math.max(0, matchIndex - 60), matchIndex).toUpperCase();
         if (prefix.includes('MAINWINDOW') || prefix.includes('HDITEM') || 
             prefix.includes('VERSION') || prefix.includes('ID') || 
             prefix.includes('PRODUCT') || prefix.includes('SERIAL') || 
@@ -2740,17 +2741,23 @@ async function handleFile(file) {
                     
                     if (tags.exif && Object.keys(tags.exif).length > 0) {
                         const visibleExifEntries = Object.entries(tags.exif).filter(([key, tag]) => {
-                            const isBinary = tag.value instanceof Uint8Array || tag.value instanceof ArrayBuffer || (Array.isArray(tag.value) && tag.value.length > 30);
-                            const val = tag.description || (isBinary ? '[Binary Data]' : String(tag.value));
-                            return !isTechnicalExifTag(key, val);
+                            const isBinary = tag.value instanceof Uint8Array || tag.value instanceof ArrayBuffer || (Array.isArray(tag.value) && tag.value.length > 30) || key === 'MakerNote' || key === 'UserComment';
+                            if (isBinary && !tag.description) return false; // Hide binary data unless specifically described
+                            return !isTechnicalExifTag(key, tag.description || String(tag.value));
                         });
 
                         if (visibleExifEntries.length > 0) {
                         hasExif = true;
                         exifSection.style.display = 'block';
                         for (const [key, tag] of visibleExifEntries) {
-                            const isBinary = tag.value instanceof Uint8Array || tag.value instanceof ArrayBuffer || (Array.isArray(tag.value) && tag.value.length > 30);
-                            const val = tag.description || (isBinary ? '[Binary Data]' : String(tag.value));
+                            const isBinary = tag.value instanceof Uint8Array || tag.value instanceof ArrayBuffer || (Array.isArray(tag.value) && tag.value.length > 30) || key === 'MakerNote' || key === 'UserComment';
+                            let val = tag.description;
+                            if (isBinary) {
+                                val = tag.description || '[Binary Data]';
+                            } else {
+                                val = tag.description || String(tag.value);
+                            }
+                            if (val && val.length > 500) val = val.substring(0, 500) + '...';
                             extractedTags[`EXIF:${key}`] = val;
                             totalTags++;
                             analyzeSensitiveText(String(val || ''), key);
@@ -2776,7 +2783,8 @@ async function handleFile(file) {
                         geoSection.style.display = 'block';
                         for (const [key, tag] of Object.entries(tags.gps)) {
                             const isBinary = tag.value instanceof Uint8Array || tag.value instanceof ArrayBuffer || (Array.isArray(tag.value) && tag.value.length > 30);
-                            const val = tag.description || (isBinary ? '[Binary Data]' : String(tag.value));
+                            let val = tag.description || (isBinary ? '[Binary Data]' : String(tag.value));
+                            if (val && val.length > 500) val = val.substring(0, 500) + '...';
                             extractedTags[`GPS:${key}`] = val;
                             totalTags++;
                             analyzeSensitiveText(String(val || ''), key);
@@ -2792,7 +2800,8 @@ async function handleFile(file) {
                             extendedSection.style.display = 'block';
                             for (const [key, tag] of Object.entries(tags[type])) {
                                 const isBinary = tag.value instanceof Uint8Array || tag.value instanceof ArrayBuffer || (Array.isArray(tag.value) && tag.value.length > 30);
-                                const val = tag.description || (isBinary ? '[Binary Data]' : String(tag.value));
+                                let val = tag.description || (isBinary ? '[Binary Data]' : String(tag.value));
+                                if (val && val.length > 500) val = val.substring(0, 500) + '...';
                                 extractedTags[`${type.toUpperCase()}:${key}`] = val;
                                 totalTags++;
                                 analyzeSensitiveText(String(val || ''), key);
@@ -3684,21 +3693,28 @@ function parseJpegMarkers(data) {
     let offset = 2;
     while (offset < data.length - 1) {
         if (data[offset] !== 0xFF) break;
+        let startOffset = offset;
         while (offset < data.length - 1 && data[offset + 1] === 0xFF) offset++;
         const marker = data[offset + 1];
-        if (marker === 0xDA) {
-            markers.push({ marker, start: offset, end: data.length });
+        if (marker === 0xDA) { // SOS
+            markers.push({ marker, start: startOffset, end: data.length });
             break;
         }
-        if (marker === 0xD9) {
-            markers.push({ marker, start: offset, end: offset + 2 });
+        if (marker === 0xD9) { // EOI
+            markers.push({ marker, start: startOffset, end: offset + 2 });
             break;
+        }
+        if (marker === 0x00 || marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) {
+            // Markers without length
+            markers.push({ marker, start: startOffset, end: offset + 2 });
+            offset += 2;
+            continue;
         }
         if (offset + 3 >= data.length) break;
         const segLen = readUint16BE(data, offset + 2);
         const segEnd = offset + 2 + segLen;
         if (segEnd > data.length) break;
-        markers.push({ marker, start: offset, end: segEnd });
+        markers.push({ marker, start: startOffset, end: segEnd });
         offset = segEnd;
     }
     return markers;
@@ -3731,18 +3747,21 @@ function stripJpegSegments(arrayBuffer, removeExif, removeXmp, removeIptc, remov
     const markers = parseJpegMarkers(data);
     if (!markers) return null;
     const keep = markers.filter(seg => {
+        let markerStart = 0;
+        const sd = data.subarray(seg.start, seg.end);
+        while(markerStart < sd.length - 1 && sd[markerStart] === 0xFF && sd[markerStart+1] === 0xFF) {
+            markerStart++;
+        }
+        
         if (seg.marker === 0xE1) {
-            const sd = data.subarray(seg.start, seg.end);
-            if (removeExif && sd.length >= 10 && matchBytes(sd, 4, "Exif\x00\x00")) return false;
-            if (removeXmp && sd.length >= 33 && matchBytes(sd, 4, "http://ns.adobe.com/xap/1.0/\x00")) return false;
+            if (removeExif && sd.length >= markerStart + 10 && matchBytes(sd, markerStart + 4, "Exif\x00\x00")) return false;
+            if (removeXmp && sd.length >= markerStart + 33 && matchBytes(sd, markerStart + 4, "http://ns.adobe.com/xap/1.0/\x00")) return false;
         }
         if (seg.marker === 0xED && removeIptc) {
-            const sd = data.subarray(seg.start, seg.end);
-            if (sd.length >= 18 && matchBytes(sd, 4, "Photoshop 3.0\x00")) return false;
+            if (sd.length >= markerStart + 18 && matchBytes(sd, markerStart + 4, "Photoshop 3.0\x00")) return false;
         }
         if (seg.marker === 0xE2 && removeIcc) {
-            const sd = data.subarray(seg.start, seg.end);
-            if (sd.length >= 16 && matchBytes(sd, 4, "ICC_PROFILE\x00")) return false;
+            if (sd.length >= markerStart + 16 && matchBytes(sd, markerStart + 4, "ICC_PROFILE\x00")) return false;
         }
         return true;
     });
@@ -3763,13 +3782,18 @@ function verifyCleanJpeg(arrayBuffer) {
     if (!markers) return { clean: false, remaining: ['Error parsing JPEG'] };
     const remaining = [];
     markers.forEach(seg => {
+        let markerStart = 0;
+        const sd = data.subarray(seg.start, seg.end);
+        while(markerStart < sd.length - 1 && sd[markerStart] === 0xFF && sd[markerStart+1] === 0xFF) {
+            markerStart++;
+        }
+
         if (seg.marker === 0xE0) remaining.push('JFIF');
         if (seg.marker >= 0xE1 && seg.marker <= 0xEF) {
-            const sd = data.subarray(seg.start, seg.end);
-            if (seg.marker === 0xE1 && sd.length >= 10 && matchBytes(sd, 4, "Exif\x00\x00")) remaining.push('EXIF');
-            else if (seg.marker === 0xE1 && sd.length >= 33 && matchBytes(sd, 4, "http://ns.adobe.com/xap/1.0/\x00")) remaining.push('XMP');
-            else if (seg.marker === 0xED && sd.length >= 18 && matchBytes(sd, 4, "Photoshop 3.0\x00")) remaining.push('IPTC');
-            else if (seg.marker === 0xE2 && sd.length >= 16 && matchBytes(sd, 4, "ICC_PROFILE\x00")) remaining.push('ICC');
+            if (seg.marker === 0xE1 && sd.length >= markerStart + 10 && matchBytes(sd, markerStart + 4, "Exif\x00\x00")) remaining.push('EXIF');
+            else if (seg.marker === 0xE1 && sd.length >= markerStart + 33 && matchBytes(sd, markerStart + 4, "http://ns.adobe.com/xap/1.0/\x00")) remaining.push('XMP');
+            else if (seg.marker === 0xED && sd.length >= markerStart + 18 && matchBytes(sd, markerStart + 4, "Photoshop 3.0\x00")) remaining.push('IPTC');
+            else if (seg.marker === 0xE2 && sd.length >= markerStart + 16 && matchBytes(sd, markerStart + 4, "ICC_PROFILE\x00")) remaining.push('ICC');
             else remaining.push(`APP${seg.marker - 0xE0}`);
         }
         if (seg.marker === 0xFE) remaining.push('Comment');
@@ -3943,8 +3967,12 @@ btnSelectiveClean.addEventListener('click', async () => {
                         if (!exifObj[ifd]) continue;
                         for (const tid in exifObj[ifd]) {
                             const tInfo = piexif.TAGS[ifd === '0th' ? 'Image' : ifd];
-                            if (tInfo && tInfo[tid] && tInfo[tid].name === name) {
-                                delete exifObj[ifd][tid];
+                            if (tInfo && tInfo[tid] && tInfo[tid].name) {
+                                const normTInfo = tInfo[tid].name.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+                                const normName = name.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+                                if (normTInfo === normName) {
+                                    delete exifObj[ifd][tid];
+                                }
                             }
                         }
                     }
@@ -3952,20 +3980,25 @@ btnSelectiveClean.addEventListener('click', async () => {
             });
 
             selectedGpsNames.forEach(name => {
-                let tagInfo = nameToTag[name] || nameToTag[`GPS${name}`] || nameToTag[`GPS${name}Ref`];
-                if (tagInfo && exifObj[tagInfo.ifd] && exifObj[tagInfo.ifd][tagInfo.id] !== undefined) {
-                    delete exifObj[tagInfo.ifd][tagInfo.id];
-                } else {
-                    if (exifObj.GPS) {
-                        for (const tid in exifObj.GPS) {
-                            const tInfo = piexif.TAGS.GPS;
-                            if (tInfo && tInfo[tid]) {
-                                const tn = tInfo[tid].name;
-                                if (tn === name || tn === `GPS${name}` || tn.replace(/^GPS/, '') === name) {
-                                    delete exifObj.GPS[tid];
-                                }
+                const normName = name.replace(/[^a-zA-Z0-9]/g, '').toLowerCase().replace(/^gps/, '');
+                
+                let foundMatch = false;
+                if (exifObj.GPS) {
+                    for (const tid in exifObj.GPS) {
+                        const tInfo = piexif.TAGS.GPS;
+                        if (tInfo && tInfo[tid] && tInfo[tid].name) {
+                            const tn = tInfo[tid].name.replace(/[^a-zA-Z0-9]/g, '').toLowerCase().replace(/^gps/, '');
+                            if (tn === normName) {
+                                delete exifObj.GPS[tid];
+                                foundMatch = true;
                             }
                         }
+                    }
+                }
+                if (!foundMatch) {
+                    let tagInfo = nameToTag[name] || nameToTag[`GPS${name}`] || nameToTag[`GPS${name}Ref`];
+                    if (tagInfo && exifObj[tagInfo.ifd] && exifObj[tagInfo.ifd][tagInfo.id] !== undefined) {
+                        delete exifObj[tagInfo.ifd][tagInfo.id];
                     }
                 }
             });
