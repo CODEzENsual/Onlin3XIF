@@ -275,20 +275,66 @@ async function renderFilePreview(source, options = {}) {
         
         video.addEventListener('loadedmetadata', async () => {
             try {
+                if (video.videoWidth <= 0 || video.videoHeight <= 0) {
+                    console.warn('Dimensiones de video inválidas (0x0)');
+                    return;
+                }
+                
                 const canvas = document.createElement('canvas');
                 canvas.width = video.videoWidth;
                 canvas.height = video.videoHeight;
-                const ctx = canvas.getContext('2d');
-                video.currentTime = Math.min(1, video.duration * 0.1);
                 
-                video.addEventListener('seeked', () => {
-                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                    const thumbnailUrl = canvas.toDataURL('image/jpeg', 0.85);
-                    video.poster = thumbnailUrl;
+                if (canvas.width <= 0 || canvas.height <= 0) {
+                    console.warn('Canvas creado con dimensiones inválidas');
                     canvas.remove();
-                }, { once: true });
+                    return;
+                }
+                
+                const ctx = canvas.getContext('2d');
+                if (!ctx) {
+                    console.warn('No se pudo obtener contexto 2D del canvas');
+                    canvas.remove();
+                    return;
+                }
+                
+                const targetTime = Math.min(1, video.duration * 0.1);
+                let thumbnailGenerated = false;
+                let seekTimeout = null;
+                
+                const onSeeked = () => {
+                    if (thumbnailGenerated) return;
+                    thumbnailGenerated = true;
+                    
+                    if (seekTimeout) clearTimeout(seekTimeout);
+                    
+                    try {
+                        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                        const thumbnailUrl = canvas.toDataURL('image/jpeg', 0.85);
+                        if (thumbnailUrl && thumbnailUrl.startsWith('data:')) {
+                            video.poster = thumbnailUrl;
+                        }
+                    } catch (drawErr) {
+                        console.warn('Error dibujando thumbnail:', drawErr);
+                    } finally {
+                        canvas.remove();
+                        video.removeEventListener('seeked', onSeeked);
+                    }
+                };
+                
+                seekTimeout = setTimeout(() => {
+                    if (!thumbnailGenerated) {
+                        thumbnailGenerated = true;
+                        console.warn('Timeout generando thumbnail de video');
+                        video.removeEventListener('seeked', onSeeked);
+                        canvas.remove();
+                    }
+                }, 2000);
+                
+                video.addEventListener('seeked', onSeeked, { once: true });
+                video.currentTime = targetTime;
+                
             } catch (e) {
-                console.warn('No se pudo generar thumbnail del vídeo');
+                console.warn('Error al generar thumbnail del vídeo:', e);
             }
         }, { once: true });
         return;
@@ -1730,9 +1776,16 @@ async function handleFile(file) {
         try {
             if (isText) {
                 textContent = await file.slice(0, 2 * 1024 * 1024).text();
-            }
-            if (textContent) {
-                analyzeSensitiveText(textContent);
+                if (textContent) {
+                    analyzeSensitiveText(textContent);
+                    // Análisis adicional de patrones en archivos de texto
+                    const lineCount = textContent.split('\n').length;
+                    addInfoRow(structureGrid, 'Número de líneas', String(lineCount));
+                    // Detectar codificación
+                    const hasUTF8 = /[\u0080-\uFFFF]/.test(textContent);
+                    const encoding = hasUTF8 ? 'UTF-8 con caracteres especiales' : 'ASCII / UTF-8';
+                    addInfoRow(structureGrid, 'Codificación detectada', encoding);
+                }
             }
         } catch (e) {
             console.log("Error reading content for analysis", e);
@@ -1742,8 +1795,18 @@ async function handleFile(file) {
         if (isImage) {
             try {
                 const buffer = await file.arrayBuffer();
-                if (typeof ExifReader !== 'undefined') {
-                    const tags = ExifReader.load(buffer, {expanded: true});
+                if (typeof ExifReader === 'undefined') {
+                    console.warn('⚠️ ExifReader no cargó correctamente - omitiendo análisis EXIF');
+                } else {
+                    let tags = null;
+                    try {
+                        tags = ExifReader.load(buffer, {expanded: true});
+                    } catch (exifErr) {
+                        console.warn('⚠️ Error al cargar EXIF:', exifErr.message);
+                        tags = {};
+                    }
+                    
+                    if (tags && typeof tags === 'object') {
                     
                     rawGrid.textContent = JSON.stringify(tags, null, 2);
                     rawSection.style.display = 'block';
@@ -1810,13 +1873,18 @@ async function handleFile(file) {
                             }
                         }
                     });
+                    }
                 }
             } catch (e) {
                 console.log("No EXIF data or error reading EXIF", e);
             }
         } else if (isVideo || isAudio) {
             try {
+                // Soporte expandido para múltiples formatos de video/audio
                 const isIsoBmff = ['mp4', 'm4v', 'm4a', 'mov'].includes(extLower) || inferredMime === 'video/mp4' || inferredMime === 'audio/mp4' || inferredMime === 'video/quicktime';
+                const isWebM = extLower === 'webm' || inferredMime === 'video/webm' || inferredMime === 'audio/webm';
+                const isMatroska = ['mkv', 'mka', 'mks'].includes(extLower) || /matroska/i.test(inferredMime);
+                
                 if (isIsoBmff) {
                     const buffer = await file.arrayBuffer();
                     const parsedMedia = parseMp4Metadata(buffer, file.size);
@@ -1843,17 +1911,47 @@ async function handleFile(file) {
                         rawGrid.textContent = JSON.stringify(parsedMedia.raw, null, 2);
                         rawSection.style.display = 'block';
                     }
+                } else if (isWebM) {
+                    // Análisis básico de WebM
+                    try {
+                        // WebM usa EBML (Event-based Binary Machine Language)
+                        const view = new DataView(buffer);
+                        if (view.byteLength >= 4 && view.getUint8(0) === 0x1A && view.getUint8(1) === 0x45 && view.getUint8(2) === 0xDF && view.getUint8(3) === 0xA3) {
+                            addInfoRow(structureGrid, 'Formato contenedor', 'WebM/EBML ✓ válido');
+                            hasContainerMetadata = true;
+                        }
+                    } catch (webmErr) {
+                        console.log('Advertencia analizando WebM:', webmErr.message);
+                    }
+                } else if (isMatroska) {
+                    // Análisis básico de Matroska
+                    try {
+                        const view = new DataView(buffer);
+                        if (view.byteLength >= 4 && view.getUint8(0) === 0x1A && view.getUint8(1) === 0x45 && view.getUint8(2) === 0xDF && view.getUint8(3) === 0xA3) {
+                            addInfoRow(structureGrid, 'Formato contenedor', 'Matroska/EBML ✓ válido');
+                            hasContainerMetadata = true;
+                        }
+                    } catch (mkvErr) {
+                        console.log('Advertencia analizando Matroska:', mkvErr.message);
+                    }
+                } else {
+                    // Otros formatos de audio/video
+                    addInfoRow(structureGrid, 'Tipo contenedor', 'Formato sin análisis de metadata extendida (AVI, FLV, ASF, etc.)');
                 }
             } catch (e) {
                 console.log('Error reading MP4/MOV metadata', e);
             }
         } else if (isPdf) {
             try {
-                if (typeof pdfjsLib !== 'undefined') {
+                if (typeof pdfjsLib === 'undefined') {
+                    console.warn('⚠️ pdfjsLib no cargó - omitiendo análisis PDF avanzado');
+                } else {
                     pdfjsLib.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.js';
                     const arrayBuffer = await file.arrayBuffer();
                     const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
                     const metadata = await pdf.getMetadata();
+                    
+                    addInfoRow(structureGrid, 'Total de páginas', String(pdf.numPages));
                     
                     rawGrid.textContent = JSON.stringify(metadata, null, 2);
                     rawSection.style.display = 'block';
@@ -1861,6 +1959,7 @@ async function handleFile(file) {
                     if (metadata.info && Object.keys(metadata.info).length > 0) {
                         hasExtended = true;
                         extendedSection.style.display = 'block';
+                        const sensitivePdfKeys = ['author', 'creator', 'producer', 'subject', 'keywords'];
                         for (const [key, val] of Object.entries(metadata.info)) {
                             if (val && typeof val === 'string' && val.trim() !== '') {
                                 extractedTags[`PDF:${key}`] = val;
@@ -1868,9 +1967,9 @@ async function handleFile(file) {
                                 analyzeSensitiveText(val, key);
                                 
                                 let valClass = '';
-                                if (key.toLowerCase().includes('author') || key.toLowerCase().includes('creator')) {
+                                if (sensitivePdfKeys.includes(key.toLowerCase())) {
                                     hasSensitive = true;
-                                    score -= 1.0;
+                                    score -= sensitivePdfKeys.slice(0, 2).includes(key.toLowerCase()) ? 1.0 : 0.3;
                                     valClass = 'sensitive';
                                 }
                                 
@@ -1884,49 +1983,144 @@ async function handleFile(file) {
             }
         } else if (isDocx) {
             try {
-                if (typeof JSZip !== 'undefined') {
+                if (typeof JSZip === 'undefined') {
+                    console.warn('⚠️ JSZip no cargó - omitiendo análisis DOCX');
+                } else {
                     const zip = new JSZip();
                     const contents = await zip.loadAsync(file);
+                    const docxMeta = {};
+                    hasExtended = true;
+                    extendedSection.style.display = 'block';
+                    const sensitiveDocxKeys = ['creator', 'lastmodifiedby', 'author'];
                     
+                    // Leer core.xml (metadatos básicos)
                     if (contents.files['docProps/core.xml']) {
                         const coreXml = await contents.files['docProps/core.xml'].async('string');
                         const parser = new DOMParser();
                         const xmlDoc = parser.parseFromString(coreXml, "text/xml");
-                        
-                        hasExtended = true;
-                        extendedSection.style.display = 'block';
-                        
                         const elements = xmlDoc.documentElement.children;
-                        const docxMeta = {};
                         
                         for (let i = 0; i < elements.length; i++) {
                             const el = elements[i];
                             const key = el.tagName.split(':').pop();
                             const val = el.textContent;
-                            
                             if (val && val.trim() !== '') {
                                 docxMeta[key] = val;
                                 extractedTags[`DOCX:${key}`] = val;
                                 totalTags++;
                                 analyzeSensitiveText(val, key);
-                                
-                                let valClass = '';
-                                if (key.toLowerCase().includes('creator') || key.toLowerCase().includes('lastmodifiedby')) {
+                                let valClass = sensitiveDocxKeys.includes(key.toLowerCase()) ? 'sensitive' : '';
+                                if (valClass) {
                                     hasSensitive = true;
                                     score -= 1.0;
-                                    valClass = 'sensitive';
                                 }
-                                
                                 addInfoRow(extendedGrid, `[DOCX] ${key}`, val, valClass);
                             }
                         }
-                        
-                        rawGrid.textContent = JSON.stringify(docxMeta, null, 2);
-                        rawSection.style.display = 'block';
                     }
+                    
+                    // Leer app.xml (aplicación, versión)
+                    if (contents.files['docProps/app.xml']) {
+                        try {
+                            const appXml = await contents.files['docProps/app.xml'].async('string');
+                            const appParser = new DOMParser();
+                            const appDoc = appParser.parseFromString(appXml, "text/xml");
+                            const appElements = appDoc.documentElement.children;
+                            for (let i = 0; i < appElements.length; i++) {
+                                const el = appElements[i];
+                                const key = el.tagName.split(':').pop();
+                                const val = el.textContent;
+                                if (val && val.trim() !== '') {
+                                    docxMeta[`App_${key}`] = val;
+                                    extractedTags[`DOCX:App_${key}`] = val;
+                                    totalTags++;
+                                    addInfoRow(extendedGrid, `[DOCX-App] ${key}`, val, '');
+                                }
+                            }
+                        } catch (appErr) {
+                            console.log('Nota: app.xml no disponible o inválido');
+                        }
+                    }
+                    
+                    // Revisar custom.xml (metadatos personalizados)
+                    if (contents.files['docProps/custom.xml']) {
+                        try {
+                            const customXml = await contents.files['docProps/custom.xml'].async('string');
+                            const customParser = new DOMParser();
+                            const customDoc = customParser.parseFromString(customXml, "text/xml");
+                            const properties = customDoc.querySelectorAll('Property');
+                            let hasCustom = false;
+                            for (const prop of properties) {
+                                const name = prop.getAttribute('name');
+                                const val = prop.textContent;
+                                if (name && val && val.trim() !== '') {
+                                    docxMeta[`Custom_${name}`] = val;
+                                    extractedTags[`DOCX:Custom_${name}`] = val;
+                                    totalTags++;
+                                    hasSensitive = true;
+                                    hasCustom = true;
+                                    score -= 0.5;
+                                    addInfoRow(extendedGrid, `[DOCX-Custom] ${name}`, val, 'warning');
+                                }
+                            }
+                            if (hasCustom) score -= 0.2;
+                        } catch (customErr) {
+                            console.log('Nota: custom.xml no disponible o vacío');
+                        }
+                    }
+                    
+                    rawGrid.textContent = JSON.stringify(docxMeta, null, 2);
+                    rawSection.style.display = 'block';
                 }
             } catch (e) {
                 console.log("Error reading DOCX metadata", e);
+            }
+        } else if (file.type === 'application/zip' || file.type === 'application/x-zip-compressed' || extLower === 'zip') {
+            // Análisis de archivos ZIP
+            try {
+                if (typeof JSZip === 'undefined') {
+                    console.warn('⚠️ JSZip no disponible para análisis ZIP');
+                } else {
+                    const zip = new JSZip();
+                    const contents = await zip.loadAsync(file);
+                    hasExtended = true;
+                    extendedSection.style.display = 'block';
+                    
+                    const zipMeta = {};
+                    const filePaths = [];
+                    let maxFiles = 0;
+                    
+                    for (const [path, fileObj] of Object.entries(contents.files)) {
+                        filePaths.push(path);
+                        if (filePaths.length <= 20) {
+                            extractedTags[`ZIP:${path}`] = fileObj.dir ? '[carpeta]' : '[archivo]';
+                        }
+                        maxFiles++;
+                    }
+                    
+                    zipMeta['archivos internos'] = maxFiles;
+                    zipMeta['archivos mostrados'] = Math.min(20, maxFiles);
+                    
+                    addInfoRow(structureGrid, 'Archivos en ZIP', String(maxFiles));
+                    addInfoRow(extendedGrid, 'Contenido mostrado', `Primeros ${Math.min(20, maxFiles)} de ${maxFiles}`);
+                    
+                    filePaths.slice(0, 20).forEach(path => {
+                        totalTags++;
+                        const isSuspicious = path.includes('..') || path.includes('~') || /\\\\.\\./i.test(path);
+                        if (isSuspicious) {
+                            hasSensitive = true;
+                            score -= 0.5;
+                            addInfoRow(extendedGrid, `[ZIP] Ruta sospechosa`, path, 'warning');
+                        } else {
+                            addInfoRow(extendedGrid, `[ZIP] ${path}`, '[contenido]', '');
+                        }
+                    });
+                    
+                    rawGrid.textContent = JSON.stringify(zipMeta, null, 2);
+                    rawSection.style.display = 'block';
+                }
+            } catch (e) {
+                console.log("Error reading ZIP contents", e);
             }
         }
 
