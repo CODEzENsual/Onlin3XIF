@@ -1417,6 +1417,817 @@ function parseMp4Metadata(arrayBuffer, fileSize = 0) {
     };
 }
 
+// ====================================================================
+// MÓDULO DE ANÁLISIS DE SEGURIDAD PARA VIDEOS
+// Detecta: Scripts incrustados, URLs, Payload binario, Base64, 
+// Metadata ofuscada, Cabeceras manipuladas, Esteganografía
+// ====================================================================
+
+function analyzeVideoSecurityThreats(arrayBuffer, fileSize = 0) {
+    const threats = [];
+    const view = new DataView(arrayBuffer);
+    const warnings = [];
+    
+    // 1. DETECCIÓN DE SCRIPTS INCRUSTADOS
+    function detectEmbeddedScripts() {
+        const scriptPatterns = [
+            /javascript:/gi,
+            /eval\s*\(/gi,
+            /on[a-z]+\s*=/gi,
+            /script\s*>/gi,
+            /<code>/gi,
+            /exec\s*\(/gi,
+            /system\s*\(/gi,
+            /shell\s*\(/gi
+        ];
+        
+        const uint8 = new Uint8Array(arrayBuffer);
+        const text = new TextDecoder('utf-8', {fatal: false}).decode(uint8.slice(0, Math.min(1000000, uint8.length)));
+        
+        for (const pattern of scriptPatterns) {
+            if (pattern.test(text)) {
+                threats.push({
+                    level: 'CRÍTICO',
+                    category: 'Scripts incrustados',
+                    description: `Se detectó patrón de script potencial: ${pattern.source}`,
+                    severity: 9
+                });
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // 2. DETECCIÓN DE URLs SOSPECHOSAS
+    function detectSuspiciousUrls() {
+        const uint8 = new Uint8Array(arrayBuffer);
+        const text = new TextDecoder('utf-8', {fatal: false}).decode(uint8.slice(0, Math.min(2000000, uint8.length)));
+        
+        const urlPattern = /https?:\/\/[^\s\x00]+/gi;
+        const ipPattern = /\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b/g;
+        const suspiciousDomains = ['malware', 'phishing', 'botnet', 'trojan', 'c2', 'c&c', 'ddos'];
+        
+        const urls = text.match(urlPattern) || [];
+        const ips = text.match(ipPattern) || [];
+        
+        if (ips.length > 0) {
+            threats.push({
+                level: 'ALTO',
+                category: 'URLs sospechosas',
+                description: `Se encontraron ${ips.length} dirección(es) IP incrustada(s): ${ips.slice(0,3).join(', ')}${ips.length > 3 ? '...' : ''}`,
+                severity: 8,
+                count: ips.length
+            });
+        }
+        
+        for (const url of urls) {
+            const urlLower = url.toLowerCase();
+            if (suspiciousDomains.some(domain => urlLower.includes(domain))) {
+                threats.push({
+                    level: 'CRÍTICO',
+                    category: 'URLs sospechosas',
+                    description: `URL potencialmente maliciosa detectada: ${url}`,
+                    severity: 9.5
+                });
+            }
+        }
+        
+        if (urls.length > 5) {
+            warnings.push({
+                level: 'ADVERTENCIA',
+                category: 'URLs múltiples',
+                description: `Se encontraron ${urls.length} URLs en el archivo de video (inusual)`,
+                severity: 6
+            });
+        }
+    }
+
+    // 3. DETECCIÓN DE PAYLOAD BINARIO OCULTO
+    function detectHiddenBinaryPayload() {
+        const uint8 = new Uint8Array(arrayBuffer);
+        let offset = 0;
+        let anomalousDataSize = 0;
+        const boxSizes = [];
+        
+        try {
+            while (offset < Math.min(50000000, uint8.length) && offset < fileSize) {
+                if (offset + 8 > uint8.length) break;
+                
+                const size = view.getUint32(offset);
+                const type = String.fromCharCode(uint8[offset + 4], uint8[offset + 5], uint8[offset + 6], uint8[offset + 7]);
+                
+                if (size < 8 || size > 100000000) break;
+                if (!/^[a-zA-Z0-9©™®]{4}$/.test(type)) {
+                    anomalousDataSize += size;
+                }
+                
+                boxSizes.push({type, size});
+                offset += size;
+            }
+            
+            // Detectar boxes desconocidas o anómalas
+            const unknownBoxes = boxSizes.filter(b => !MP4_CONTAINER_BOXES.has(b.type));
+            if (unknownBoxes.length > 0) {
+                const totalUnknown = unknownBoxes.reduce((sum, b) => sum + b.size, 0);
+                if (totalUnknown > 50000) {
+                    threats.push({
+                        level: 'ALTO',
+                        category: 'Payload binario oculto',
+                        description: `${unknownBoxes.length} box(es) desconocida(s) con ${totalUnknown} bytes: ${unknownBoxes.map(b => b.type).join(', ')}.`,
+                        severity: 8,
+                        count: unknownBoxes.length
+                    });
+                }
+            }
+        } catch (e) {
+            warnings.push({
+                level: 'ADVERTENCIA',
+                category: 'Análisis de estructura',
+                description: `Error al analizar estructura de contenedor`,
+                severity: 3
+            });
+        }
+    }
+
+    // 4. DETECCIÓN DE MÚLTIPLES BLOBS BASE64
+    function detectMultipleBase64Blobs() {
+        const uint8 = new Uint8Array(arrayBuffer);
+        const text = new TextDecoder('utf-8', {fatal: false}).decode(uint8.slice(0, Math.min(5000000, uint8.length)));
+        
+        // Buscar cadenas base64 largas (>500 chars)
+        const base64Pattern = /[A-Za-z0-9+\/]{500,}={0,2}/g;
+        const matches = text.match(base64Pattern) || [];
+        
+        if (matches.length > 1) {
+            threats.push({
+                level: 'MEDIO',
+                category: `Múltiples blobs Base64`,
+                description: `Se encontraron ${matches.length} bloques Base64 codificados (tamaño > 500 chars). Podrían ocultar archivos o scripts.`,
+                severity: 7,
+                count: matches.length,
+                totalSize: matches.reduce((sum, m) => sum + m.length, 0)
+            });
+        } else if (matches.length === 1 && matches[0].length > 10000) {
+            warnings.push({
+                level: 'ADVERTENCIA',
+                category: 'Base64 muy largo',
+                description: `Se encontró un bloque Base64 de ${matches[0].length} caracteres (sospechoso)`,
+                severity: 5,
+                size: matches[0].length
+            });
+        }
+    }
+
+    // 5. DETECCIÓN DE METADATA OFUSCADA
+    function detectObfuscatedMetadata() {
+        const uint8 = new Uint8Array(arrayBuffer);
+        let offset = 0;
+        
+        try {
+            while (offset + 8 <= uint8.length && offset < 10000000) {
+                const size = view.getUint32(offset);
+                const type = String.fromCharCode(uint8[offset + 4], uint8[offset + 5], uint8[offset + 6], uint8[offset + 7]);
+                
+                if (size < 8 || size > 100000000 || offset + size > uint8.length) break;
+                
+                // Analizar metadata box (ilst, meta, etc)
+                if (['ilst', 'meta', 'udta'].includes(type)) {
+                    const boxContent = uint8.slice(offset + 8, offset + size);
+                    
+                    // Detectar patrones de ofuscación
+                    let entropyScore = 0;
+                    const byteFreq = {};
+                    for (let i = 0; i < boxContent.length; i++) {
+                        byteFreq[boxContent[i]] = (byteFreq[boxContent[i]] || 0) + 1;
+                    }
+                    
+                    // Alta entropía = posible cifrado/ofuscación
+                    for (const byte in byteFreq) {
+                        const freq = byteFreq[byte] / boxContent.length;
+                        if (freq > 0.01) entropyScore += freq * Math.log2(1 / freq);
+                    }
+                    
+                    if (entropyScore > 7.5) {
+                        warnings.push({
+                            level: 'ADVERTENCIA',
+                            category: 'Metadata ofuscada',
+                            description: `Box ${type} parece contener datos cifrados o codificados (entropía: ${entropyScore.toFixed(2)})`,
+                            severity: 6,
+                            entropy: entropyScore.toFixed(2)
+                        });
+                    }
+                }
+                
+                offset += size;
+            }
+        } catch (e) {
+            console.log('Error detectando metadata ofuscada:', e.message);
+        }
+    }
+
+    // 6. DETECCIÓN DE CABECERAS MANIPULADAS
+    function detectManipulatedHeaders() {
+        const uint8 = new Uint8Array(arrayBuffer);
+        
+        // Verificar integridad estructural de boxes
+        let offset = 0;
+        const headerErrors = [];
+        
+        try {
+            while (offset + 8 <= uint8.length && offset < 5000000) {
+                const size = view.getUint32(offset);
+                
+                // Validaciones de integridad
+                if (size < 8) {
+                    headerErrors.push(`Box size inválido (${size} bytes) en offset ${offset}`);
+                }
+                if (offset + size > uint8.length) {
+                    headerErrors.push(`Box size excede buffer en offset ${offset} (size: ${size})`);
+                    break;
+                }
+                
+                const type = String.fromCharCode(uint8[offset + 4], uint8[offset + 5], uint8[offset + 6], uint8[offset + 7]);
+                
+                // Detectar types inválidos
+                if (!/^[\x20-\x7E]{4}$/.test(type)) {
+                    headerErrors.push(`Type de box inválido en offset ${offset}: ${type.charCodeAt(0)}`);
+                }
+                
+                offset += size;
+            }
+            
+            if (headerErrors.length > 3) {
+                threats.push({
+                    level: 'CRÍTICO',
+                    category: 'Cabeceras manipuladas',
+                    description: `Se detectaron ${headerErrors.length} anomalías estructurales en el contenedor MP4. El archivo podría estar corrupto o manipulado.`,
+                    severity: 9,
+                    errors: headerErrors.slice(0, 3)
+                });
+            }
+        } catch (e) {
+            console.log('Error verificando cabeceras:', e.message);
+        }
+    }
+
+    // 7. DETECCIÓN DE ESTEGANOGRAFÍA (Stegomalware)
+    function detectSteganography() {
+        const uint8 = new Uint8Array(arrayBuffer);
+        
+        // Buscar patrones de padding anómalo (espacio para ocultar datos)
+        let padding = 0;
+        let suspicious = false;
+        
+        // Verificar al final del archivo buscando padding nulls
+        if (uint8.length > 1000) {
+            let tailStart = uint8.length - 1;
+            while (tailStart > 0 && uint8[tailStart] === 0) {
+                padding++;
+                tailStart--;
+            }
+            
+            if (padding > 100000) {
+                threats.push({
+                    level: 'MEDIO',
+                    category: 'Esteganografía sospechosa',
+                    description: `Se detectó ${padding} bytes de padding al final del archivo. Podría contener datos ocultos.`,
+                    severity: 7,
+                    paddingBytes: padding
+                });
+                suspicious = true;
+            }
+        }
+        
+        // Buscar patrones de ocultación en metadata
+        const uint32View = new Uint32Array(arrayBuffer);
+        let anomalousBlocks = 0;
+        
+        for (let i = 0; i < Math.min(100000, uint32View.length); i += 1000) {
+            const val = uint32View[i];
+            if ((val & 0xFF) === (val >> 8 & 0xFF) && (val >> 16 & 0xFF) === (val >> 24 & 0xFF)) {
+                anomalousBlocks++;
+            }
+        }
+        
+        if (anomalousBlocks > 50 && !suspicious) {
+            warnings.push({
+                level: 'ADVERTENCIA',
+                category: 'Patrones anómalos',
+                description: `Se detectaron ${anomalousBlocks} bloques con patrones repetitivos (posible ocultación).`,
+                severity: 5,
+                blocks: anomalousBlocks
+            });
+        }
+    }
+
+    // Ejecutar todos los análisis
+    detectEmbeddedScripts();
+    detectSuspiciousUrls();
+    detectHiddenBinaryPayload();
+    detectMultipleBase64Blobs();
+    detectObfuscatedMetadata();
+    detectManipulatedHeaders();
+    detectSteganography();
+    
+    return {
+        threatCount: threats.length,
+        warningCount: warnings.length,
+        threats: threats.sort((a, b) => b.severity - a.severity),
+        warnings: warnings.sort((a, b) => b.severity - a.severity),
+        criticalThreats: threats.filter(t => t.level === 'CRÍTICO'),
+        summary: {
+            safe: threats.length === 0,
+            riskLevel: threats.length > 0 ? (threats.some(t => t.level === 'CRÍTICO') ? 'CRÍTICO' : 'ALTO') : 'BAJO'
+        }
+    };
+}
+
+// ====================================================================
+// ANÁLISIS DE SEGURIDAD PARA IMÁGENES (JPG, PNG, WEBP, etc.)
+// ====================================================================
+
+function analyzeImageSecurityThreats(arrayBuffer) {
+    const threats = [];
+    const warnings = [];
+    const uint8 = new Uint8Array(arrayBuffer);
+    const view = new DataView(arrayBuffer);
+    
+    // EXIF Injection - detectar EXIF con scripts compilados
+    function detectExifInjection() {
+        // Buscar marcadores JPEG EXIF (FFE1)
+        for (let i = 0; i < uint8.length - 4; i++) {
+            if (uint8[i] === 0xFF && uint8[i + 1] === 0xE1) {
+                const size = view.getUint16(i + 2);
+                const exifData = uint8.slice(i + 4, i + size + 2);
+                const exifText = new TextDecoder('utf-8', {fatal: false}).decode(exifData);
+                
+                if (/javascript:|eval\(|<script|exec\(|base64|cmd\.exe|powershell/gi.test(exifText)) {
+                    threats.push({
+                        level: 'CRÍTICO',
+                        category: 'EXIF Injection',
+                        description: 'Se detectó código potencialmente ejecutable en datos EXIF',
+                        severity: 9
+                    });
+                }
+            }
+        }
+    }
+    
+    // Detectar embedded ZIP o archivos ejecutables
+    function detectEmbeddedFiles() {
+        const patterns = [
+            { sig: [0x50, 0x4B, 0x03, 0x04], name: 'ZIP/Office' },
+            { sig: [0x4D, 0x5A], name: 'Ejecutable PE' },
+            { sig: [0x7F, 0x45, 0x4C, 0x46], name: 'Ejecutable ELF' }
+        ];
+        
+        for (const pattern of patterns) {
+            for (let i = 0; i < uint8.length - pattern.sig.length; i++) {
+                if (uint8.slice(i, i + pattern.sig.length).every((val, idx) => val === pattern.sig[idx])) {
+                    threats.push({
+                        level: 'CRÍTICO',
+                        category: 'Archivo ejecutable embedded',
+                        description: `Se detectó un archivo ${pattern.name} dentro de la imagen`,
+                        severity: 9.5
+                    });
+                    return;
+                }
+            }
+        }
+    }
+    
+    // Detectar IptcData maliciosa
+    function detectMaliciousMetadata() {
+        for (let i = 0; i < uint8.length - 4; i++) {
+            if (uint8[i] === 0x80 && uint8[i + 1] === 0x04) {
+                // IPTC marker
+                const data = uint8.slice(i, Math.min(i + 1000, uint8.length));
+                const text = new TextDecoder('utf-8', {fatal: false}).decode(data);
+                
+                if (/malware|virus|trojan|botnet|c2|payload|shell/gi.test(text)) {
+                    warnings.push({
+                        level: 'ADVERTENCIA',
+                        category: 'Metadata sospechosa IPTC',
+                        description: 'Se encontraron palabras clave maliciosas en metadata IPTC',
+                        severity: 6
+                    });
+                }
+            }
+        }
+    }
+    
+    detectExifInjection();
+    detectEmbeddedFiles();
+    detectMaliciousMetadata();
+    
+    return {
+        threatCount: threats.length,
+        warningCount: warnings.length,
+        threats: threats.sort((a, b) => b.severity - a.severity),
+        warnings: warnings.sort((a, b) => b.severity - a.severity),
+        summary: { safe: threats.length === 0 }
+    };
+}
+
+// ====================================================================
+// ANÁLISIS DE SEGURIDAD PARA PDF
+// ====================================================================
+
+function analyzePdfSecurityThreats(pdfData) {
+    const threats = [];
+    const warnings = [];
+    
+    const text = typeof pdfData === 'string' ? pdfData : new TextDecoder('utf-8', {fatal: false}).decode(new Uint8Array(pdfData));
+    
+    // Detectar JavaScript en PDF
+    function detectPdfJavaScript() {
+        if (/\/JS\s|\/OpenAction|\/AA\s|javascript:|eval\(/gi.test(text)) {
+            threats.push({
+                level: 'CRÍTICO',
+                category: 'JavaScript en PDF',
+                description: 'Se detectó código JavaScript potencialmente malicioso en el PDF',
+                severity: 9.5
+            });
+            return true;
+        }
+        return false;
+    }
+    
+    // Detectar objetos malformed
+    function detectMalformedObjects() {
+        const objPattern = /\/obj\s|endobj|stream|endstream/gi;
+        const matches = (text.match(objPattern) || []).length;
+        
+        if (matches > 100) {
+            warnings.push({
+                level: 'ADVERTENCIA',
+                category: 'Estructura PDF anómala',
+                description: `PDF contiene ${Math.round(matches/2)} objetos (inusualmente alto)`,
+                severity: 5
+            });
+        }
+    }
+    
+    // Detectar launching actions
+    function detectLaunchingActions() {
+        if (/\/Launch|\/SubmitForm|\/ImportData|\/RichMedia|\/Flash/gi.test(text)) {
+            threats.push({
+                level: 'ALTO',
+                category: 'Acciones de lanzamiento detectadas',
+                description: 'El PDF contiene acciones que pueden ejecutar aplicaciones externas',
+                severity: 8
+            });
+        }
+    }
+    
+    // Detectar URLs sospechosas
+    function detectSuspiciousUrls() {
+        const urlPattern = /https?:\/\/[^\s\)]+/gi;
+        const urls = text.match(urlPattern) || [];
+        
+        const suspicious = urls.filter(u => /malware|virus|trojan|phishing|botnet|c2/gi.test(u));
+        if (suspicious.length > 0) {
+            threats.push({
+                level: 'CRÍTICO',
+                category: 'URLs maliciosas en PDF',
+                description: `Se encontraron ${suspicious.length} URL(s) potencialmente maliciosa(s)`,
+                severity: 9
+            });
+        }
+    }
+    
+    detectPdfJavaScript();
+    detectMalformedObjects();
+    detectLaunchingActions();
+    detectSuspiciousUrls();
+    
+    return {
+        threatCount: threats.length,
+        warningCount: warnings.length,
+        threats,
+        warnings,
+        summary: { safe: threats.length === 0 }
+    };
+}
+
+// ====================================================================
+// ANÁLISIS DE SEGURIDAD PARA DOCX / OFFICE
+// ====================================================================
+
+function analyzeDocxSecurityThreats(zipContent) {
+    const threats = [];
+    const warnings = [];
+    
+    // Detectar macros VBA
+    function detectMacros() {
+        if (zipContent.files && zipContent.files['word/vbaProject.bin']) {
+            threats.push({
+                level: 'CRÍTICO',
+                category: 'Macros VBA detectadas',
+                description: 'El documento DOCX contiene macros que pueden ejecutar código arbitrario',
+                severity: 9.5
+            });
+            return true;
+        }
+        return false;
+    }
+    
+    // Detectar links externos no seguros
+    async function detectExternalLinks() {
+        if (zipContent.files['word/document.xml']) {
+            try {
+                const docXml = await zipContent.files['word/document.xml'].async('string');
+                const externalLinks = (docXml.match(/r:embed|r:link|hyperlink/gi) || []).length;
+                
+                if (docXml.match(/http[s]?:\/\/[^\s"]+/gi)) {
+                    const suspiciousUrls = docXml.match(/(?:malware|trojan|phishing|botnet)[^\s"]*/gi) || [];
+                    if (suspiciousUrls.length > 0) {
+                        threats.push({
+                            level: 'ALTO',
+                            category: 'Links potencialmente maliciosos',
+                            description: `Se encontraron ${suspiciousUrls.length} enlace(s) sospechoso(s)`,
+                            severity: 8
+                        });
+                    }
+                }
+                
+                if (externalLinks > 10) {
+                    warnings.push({
+                        level: 'ADVERTENCIA',
+                        category: 'Múltiples enlaces externos',
+                        description: `El documento contiene ${externalLinks} enlaces externos (inusual)`,
+                        severity: 5
+                    });
+                }
+            } catch (e) {
+                console.log('Error analizando documento XML:', e);
+            }
+        }
+    }
+    
+    // Detectar objetos embebidos
+    function detectEmbeddedObjects() {
+        if (zipContent.files && zipContent.files['word/embeddings']) {
+            warnings.push({
+                level: 'ADVERTENCIA',
+                category: 'Objetos embebidos detectados',
+                description: 'El documento contiene objetos embebidos que podrían ejecutar código',
+                severity: 6
+            });
+            return true;
+        }
+        return false;
+    }
+    
+    detectMacros();
+    detectExternalLinks();
+    detectEmbeddedObjects();
+    
+    return {
+        threatCount: threats.length,
+        warningCount: warnings.length,
+        threats,
+        warnings,
+        summary: { safe: threats.length === 0 }
+    };
+}
+
+// ====================================================================
+// ANÁLISIS DE SEGURIDAD PARA ZIP / ARCHIVOS COMPRIMIDOS
+// ====================================================================
+
+function analyzeZipSecurityThreats(zipContent) {
+    const threats = [];
+    const warnings = [];
+    
+    // Detectar archivos ejecutables
+    function detectExecutables() {
+        const executableExts = ['exe', 'dll', 'scr', 'bat', 'cmd', 'com', 'pif', 'vbs', 'ps1', 'jar'];
+        const executables = [];
+        
+        if (zipContent.files) {
+            for (const [path, file] of Object.entries(zipContent.files)) {
+                const ext = path.split('.').pop().toLowerCase();
+                if (executableExts.includes(ext)) {
+                    executables.push(path);
+                }
+            }
+        }
+        
+        if (executables.length > 0) {
+            threats.push({
+                level: 'CRÍTICO',
+                category: 'Archivos ejecutables en ZIP',
+                description: `Se detectaron ${executables.length} archivo(s) ejecutable(s): ${executables.slice(0, 3).join(', ')}${executables.length > 3 ? '...' : ''}`,
+                severity: 9.5,
+                count: executables.length
+            });
+        }
+    }
+    
+    // Detectar path traversal
+    function detectPathTraversal() {
+        const maliciousPaths = [];
+        
+        if (zipContent.files) {
+            for (const path of Object.keys(zipContent.files)) {
+                if (path.includes('..\\') || path.includes('../') || path.startsWith('/')) {
+                    maliciousPaths.push(path);
+                }
+            }
+        }
+        
+        if (maliciousPaths.length > 0) {
+            threats.push({
+                level: 'CRÍTICO',
+                category: 'Path Traversal detectado',
+                description: `El ZIP contiene rutas que pueden escribir fuera del directorio destino (${maliciousPaths.length} archivos)`,
+                severity: 9,
+                count: maliciousPaths.length
+            });
+        }
+    }
+    
+    // Detectar bomba ZIP (compresión extrema)
+    function detectZipBomb() {
+        let compressedSize = 0;
+        let uncompressedSize = 0;
+        
+        if (zipContent.files) {
+            for (const file of Object.values(zipContent.files)) {
+                compressedSize += file._data ? file._data.compressedSize || 0 : 0;
+                uncompressedSize += file._data ? file._data.uncompressedSize || 0 : 0;
+            }
+        }
+        
+        // Si la ratio de compresión es > 100x es sospechoso
+        if (compressedSize > 0 && uncompressedSize / compressedSize > 100) {
+            warnings.push({
+                level: 'ADVERTENCIA',
+                category: 'Posible ZIP bomb',
+                description: `Ratio de compresión muy alta (${(uncompressedSize / compressedSize).toFixed(1)}x). Posible ataque de negación de servicio.`,
+                severity: 7,
+                ratio: (uncompressedSize / compressedSize).toFixed(1)
+            });
+        }
+    }
+    
+    // Detectar archivos ocultos
+    function detectHiddenOrEncrypted() {
+        let encrypted = 0;
+        let hidden = 0;
+        
+        if (zipContent.files) {
+            for (const [path, file] of Object.entries(zipContent.files)) {
+                if (path.startsWith('.')) hidden++;
+                if (file._data && file._data.encrypted) encrypted++;
+            }
+        }
+        
+        if (encrypted > 0) {
+            warnings.push({
+                level: 'ADVERTENCIA',
+                category: 'Archivos encriptados en ZIP',
+                description: `${encrypted} archivo(s) están encriptados (imposible verificar contenido)`,
+                severity: 6,
+                count: encrypted
+            });
+        }
+    }
+    
+    detectExecutables();
+    detectPathTraversal();
+    detectZipBomb();
+    detectHiddenOrEncrypted();
+    
+    return {
+        threatCount: threats.length,
+        warningCount: warnings.length,
+        threats,
+        warnings,
+        summary: { safe: threats.length === 0 }
+    };
+}
+
+// ====================================================================
+// ANÁLISIS DE SEGURIDAD PARA AUDIO (MP3, WAV, FLAC, etc.)
+// ====================================================================
+
+function analyzeAudioSecurityThreats(arrayBuffer) {
+    const threats = [];
+    const warnings = [];
+    const uint8 = new Uint8Array(arrayBuffer);
+    const text = new TextDecoder('utf-8', {fatal: false}).decode(uint8.slice(0, Math.min(500000, uint8.length)));
+    
+    // Detectar metadata maliciosa en tags ID3
+    function detectId3Injection() {
+        if (/^ID3/i.test(new TextDecoder('utf-8', {fatal: false}).decode(uint8.slice(0, 3)))) {
+            if (/javascript:|eval\(|<script|exec\(|powershell|cmd\.exe/gi.test(text)) {
+                threats.push({
+                    level: 'CRÍTICO',
+                    category: 'ID3 Tag Injection',
+                    description: 'Se detectó código potencialmente ejecutable en tags ID3 del audio',
+                    severity: 9
+                });
+            }
+        }
+    }
+    
+    // Detectar URLs sospechosas en metadata
+    function detectSuspiciousUrls() {
+        const urlPattern = /https?:\/\/[^\s\)]+/gi;
+        const urls = text.match(urlPattern) || [];
+        const suspicious = urls.filter(u => /malware|botnet|trojan|phishing|c2/gi.test(u));
+        
+        if (suspicious.length > 0) {
+            warnings.push({
+                level: 'ADVERTENCIA',
+                category: 'URLs sospechosas en audio',
+                description: `Se encontraron ${suspicious.length} URL(s) con patrones maliciosos`,
+                severity: 6
+            });
+        }
+    }
+    
+    // Detectar embedding de archivos
+    function detectEmbeddedPayload() {
+        // Buscar patrones ZIP o ejecutables
+        const patterns = [
+            { sig: [0x50, 0x4B, 0x03, 0x04], name: 'ZIP' },
+            { sig: [0x4D, 0x5A], name: 'Ejecutable PE' }
+        ];
+        
+        for (const pattern of patterns) {
+            for (let i = 100; i < uint8.length - pattern.sig.length; i++) {
+                if (uint8.slice(i, i + pattern.sig.length).every((val, idx) => val === pattern.sig[idx])) {
+                    warnings.push({
+                        level: 'ADVERTENCIA',
+                        category: 'Payload embebido detectado',
+                        description: `Se encontró un archivo ${pattern.name} dentro del audio`,
+                        severity: 7
+                    });
+                    return;
+                }
+            }
+        }
+    }
+    
+    detectId3Injection();
+    detectSuspiciousUrls();
+    detectEmbeddedPayload();
+    
+    return {
+        threatCount: threats.length,
+        warningCount: warnings.length,
+        threats,
+        warnings,
+        summary: { safe: threats.length === 0 }
+    };
+}
+
+// ====================================================================
+// FUNCIÓN WRAPPER - Análisis automático según tipo de archivo
+// ====================================================================
+
+function analyzeFileSecurityThreats(file, buffer, fileCategory) {
+    const threats = [];
+    const warnings = [];
+    
+    try {
+        if (fileCategory === 'Vídeo' || fileCategory.includes('Vídeo')) {
+            return analyzeVideoSecurityThreats(buffer, file.size);
+        } else if (fileCategory === 'Imagen' || fileCategory.includes('Imagen') || fileCategory.includes('GIF')) {
+            return analyzeImageSecurityThreats(buffer);
+        } else if (fileCategory === 'PDF') {
+            return analyzePdfSecurityThreats(buffer);
+        } else if (fileCategory === 'Audio' || fileCategory.includes('Audio')) {
+            return analyzeAudioSecurityThreats(buffer);
+        }
+    } catch (e) {
+        console.warn('Error en análisis de seguridad:', e.message);
+        return {
+            threatCount: 0,
+            warningCount: 1,
+            threats: [],
+            warnings: [{
+                level: 'ADVERTENCIA',
+                category: 'Error de análisis',
+                description: 'No se pudo completar el análisis de seguridad',
+                severity: 2
+            }],
+            summary: { safe: false }
+        };
+    }
+    
+    return {
+        threatCount: 0,
+        warningCount: 0,
+        threats: [],
+        warnings: [],
+        summary: { safe: true }
+    };
+}
+
 function concatUint8Arrays(chunks) {
     const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
     const result = new Uint8Array(totalLength);
@@ -1739,6 +2550,40 @@ async function handleFile(file) {
                 };
             });
         } else if (isVideo || isAudio) {
+            // ANÁLISIS DE AMENAZAS DE SEGURIDAD PARA AUDIO
+            if (isAudio) {
+                try {
+                    const audioBuffer = await file.arrayBuffer();
+                    const securityAnalysisAudio = analyzeAudioSecurityThreats(audioBuffer);
+                    if (securityAnalysisAudio.threatCount > 0 || securityAnalysisAudio.warningCount > 0) {
+                        hasExtended = true;
+                        extendedSection.style.display = 'block';
+                        
+                        const threatSummary = document.createElement('div');
+                        threatSummary.className = 'security-threat-summary';
+                        threatSummary.style.cssText = 'margin:10px 0;padding:12px;border-radius:6px;border-left:4px solid;background-color:#fff3cd;border-color:#ffc107;color:#664d03;font-weight:600;';
+                        threatSummary.innerHTML = `⚠️ <strong>Alerta de seguridad audio:</strong> ${securityAnalysisAudio.threatCount} amenaza(s)`;
+                        
+                        if (extendedGrid && extendedGrid.parentElement) {
+                            extendedGrid.parentElement.insertBefore(threatSummary, extendedGrid);
+                        }
+                        
+                        securityAnalysisAudio.threats.forEach(threat => {
+                            addInfoRow(extendedGrid, threat.category, threat.description, 'sensitive');
+                            score -= 1.5;
+                            hasSensitive = true;
+                        });
+                        
+                        securityAnalysisAudio.warnings.forEach(warning => {
+                            addInfoRow(extendedGrid, warning.category, warning.description, 'warning');
+                            score -= 0.3;
+                        });
+                    }
+                } catch (e) {
+                    console.log('Error analizando seguridad de audio:', e);
+                }
+            }
+            
             const media = document.createElement(isVideo ? 'video' : 'audio');
             const mediaUrl = URL.createObjectURL(file);
             media.src = mediaUrl;
@@ -1850,6 +2695,33 @@ async function handleFile(file) {
                     buffer = await file.arrayBuffer();
                 }
                 
+                // ANÁLISIS DE AMENAZAS DE SEGURIDAD PARA IMÁGENES
+                const securityAnalysisImg = analyzeImageSecurityThreats(buffer);
+                if (securityAnalysisImg.threatCount > 0 || securityAnalysisImg.warningCount > 0) {
+                    hasExtended = true;
+                    extendedSection.style.display = 'block';
+                    
+                    const threatSummary = document.createElement('div');
+                    threatSummary.className = 'security-threat-summary';
+                    threatSummary.style.cssText = 'margin:10px 0;padding:12px;border-radius:6px;border-left:4px solid;background-color:#fff3cd;border-color:#ffc107;color:#664d03;font-weight:600;';
+                    threatSummary.innerHTML = `⚠️ <strong>Alerta de seguridad:</strong> ${securityAnalysisImg.threatCount} amenaza(s) detectada(s)`;
+                    
+                    if (extendedGrid.parentElement) {
+                        extendedGrid.parentElement.insertBefore(threatSummary, extendedGrid);
+                    }
+                    
+                    securityAnalysisImg.threats.forEach(threat => {
+                        addInfoRow(extendedGrid, threat.category, threat.description, 'sensitive');
+                        score -= 1.5;
+                        hasSensitive = true;
+                    });
+                    
+                    securityAnalysisImg.warnings.forEach(warning => {
+                        addInfoRow(extendedGrid, warning.category, warning.description, 'warning');
+                        score -= 0.5;
+                    });
+                }
+                
                 if (typeof ExifReader === 'undefined') {
                     console.warn('⚠️ ExifReader no cargó correctamente - omitiendo análisis EXIF');
                 } else {
@@ -1951,6 +2823,44 @@ async function handleFile(file) {
                             buffer = await file.arrayBuffer();
                         }
                         const parsedMedia = parseMp4Metadata(buffer, file.size);
+                        
+                        // ANÁLISIS DE AMENAZAS DE SEGURIDAD
+                        const securityAnalysis = analyzeVideoSecurityThreats(buffer, file.size);
+                        if (securityAnalysis.threatCount > 0 || securityAnalysis.warningCount > 0) {
+                            hasExtended = true;
+                            extendedSection.style.display = 'block';
+                            
+                            // Mostrar resumen de amenazas
+                            const threatSummary = document.createElement('div');
+                            threatSummary.className = 'security-threat-summary';
+                            threatSummary.style.cssText = 'margin:10px 0;padding:12px;border-radius:6px;border-left:4px solid;background-color:#fff3cd;border-color:#ffc107;color:#664d03;font-weight:600;';
+                            
+                            const riskIcon = securityAnalysis.summary.riskLevel === 'CRÍTICO' ? '🚨' : '⚠️';
+                            threatSummary.innerHTML = `${riskIcon} <strong>Alerta de seguridad:</strong> Se detectaron ${securityAnalysis.threatCount} amenaza(s) y ${securityAnalysis.warningCount} advertencia(s) en el video`;
+                            
+                            extendedGrid.parentElement.insertBefore(threatSummary, extendedGrid);
+                            
+                            // Mostrar amenazas críticas
+                            securityAnalysis.criticalThreats.forEach(threat => {
+                                const threatRow = `[${threat.category}] 🚨 ${threat.description}`;
+                                addInfoRow(extendedGrid, threat.category, threat.description, 'sensitive', false, threat.category);
+                                score -= 2.0; // Penalidad significativa por amenazas críticas
+                            });
+                            
+                            // Mostrar otras amenazas
+                            securityAnalysis.threats.filter(t => t.level !== 'CRÍTICO').forEach(threat => {
+                                addInfoRow(extendedGrid, `[Amenaza] ${threat.category}`, threat.description, 'warning', false, threat.category);
+                                score -= 1.0;
+                            });
+                            
+                            // Mostrar advertencias
+                            securityAnalysis.warnings.forEach(warning => {
+                                addInfoRow(extendedGrid, `[Advertencia] ${warning.category}`, warning.description, 'warning', false, warning.category);
+                                score -= 0.3;
+                                hasSensitive = true;
+                            });
+                        }
+                        
                         if (parsedMedia.found) {
                             hasContainerMetadata = true;
                             hasExtended = true;
@@ -1981,11 +2891,29 @@ async function handleFile(file) {
                 } else if (isWebM) {
                     // Análisis básico de WebM
                     try {
-                        const headerBuffer = await file.slice(0, 1024).arrayBuffer();
-                        const view = new DataView(headerBuffer);
+                        const webmBuffer = await file.arrayBuffer();
+                        const view = new DataView(webmBuffer);
                         if (view.byteLength >= 4 && view.getUint8(0) === 0x1A && view.getUint8(1) === 0x45 && view.getUint8(2) === 0xDF && view.getUint8(3) === 0xA3) {
                             addInfoRow(structureGrid, 'Formato contenedor', 'WebM/EBML ✓ válido');
                             hasContainerMetadata = true;
+                            
+                            // ANÁLISIS DE AMENAZAS PARA WEBM
+                            const securityAnalysis = analyzeVideoSecurityThreats(webmBuffer, file.size);
+                            if (securityAnalysis.threatCount > 0 || securityAnalysis.warningCount > 0) {
+                                hasExtended = true;
+                                extendedSection.style.display = 'block';
+                                
+                                const threatSummary = document.createElement('div');
+                                threatSummary.className = 'security-threat-summary';
+                                threatSummary.style.cssText = 'margin:10px 0;padding:12px;border-radius:6px;border-left:4px solid;background-color:#fff3cd;border-color:#ffc107;color:#664d03;font-weight:600;';
+                                threatSummary.innerHTML = `⚠️ <strong>Alerta de seguridad WebM:</strong> ${securityAnalysis.threatCount} amenaza(s) detectada(s)`;
+                                extendedGrid.parentElement.insertBefore(threatSummary, extendedGrid);
+                                
+                                securityAnalysis.threats.forEach(threat => {
+                                    addInfoRow(extendedGrid, `[${threat.category}]`, threat.description, threat.level === 'CRÍTICO' ? 'sensitive' : 'warning');
+                                    score -= threat.level === 'CRÍTICO' ? 2.0 : 0.8;
+                                });
+                            }
                         }
                     } catch (webmErr) {
                         console.log('Advertencia analizando WebM:', webmErr.message);
@@ -1993,11 +2921,29 @@ async function handleFile(file) {
                 } else if (isMatroska) {
                     // Análisis básico de Matroska
                     try {
-                        const headerBuffer = await file.slice(0, 1024).arrayBuffer();
-                        const view = new DataView(headerBuffer);
+                        const mkvBuffer = await file.arrayBuffer();
+                        const view = new DataView(mkvBuffer);
                         if (view.byteLength >= 4 && view.getUint8(0) === 0x1A && view.getUint8(1) === 0x45 && view.getUint8(2) === 0xDF && view.getUint8(3) === 0xA3) {
                             addInfoRow(structureGrid, 'Formato contenedor', 'Matroska/EBML ✓ válido');
                             hasContainerMetadata = true;
+                            
+                            // ANÁLISIS DE AMENAZAS PARA MATROSKA
+                            const securityAnalysis = analyzeVideoSecurityThreats(mkvBuffer, file.size);
+                            if (securityAnalysis.threatCount > 0 || securityAnalysis.warningCount > 0) {
+                                hasExtended = true;
+                                extendedSection.style.display = 'block';
+                                
+                                const threatSummary = document.createElement('div');
+                                threatSummary.className = 'security-threat-summary';
+                                threatSummary.style.cssText = 'margin:10px 0;padding:12px;border-radius:6px;border-left:4px solid;background-color:#fff3cd;border-color:#ffc107;color:#664d03;font-weight:600;';
+                                threatSummary.innerHTML = `⚠️ <strong>Alerta de seguridad MKV:</strong> ${securityAnalysis.threatCount} amenaza(s) detectada(s)`;
+                                extendedGrid.parentElement.insertBefore(threatSummary, extendedGrid);
+                                
+                                securityAnalysis.threats.forEach(threat => {
+                                    addInfoRow(extendedGrid, `[${threat.category}]`, threat.description, threat.level === 'CRÍTICO' ? 'sensitive' : 'warning');
+                                    score -= threat.level === 'CRÍTICO' ? 2.0 : 0.8;
+                                });
+                            }
                         }
                     } catch (mkvErr) {
                         console.log('Advertencia analizando Matroska:', mkvErr.message);
@@ -2017,11 +2963,42 @@ async function handleFile(file) {
                     const MAX_PDF_MEM = 50 * 1024 * 1024; // Limit PDF reading memory
                     pdfjsLib.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.js';
                     let pdfData;
+                    let pdfBuffer;
                     if (file.size > MAX_PDF_MEM) {
                          const fileUrl = URL.createObjectURL(file);
                          pdfData = { url: fileUrl };
                     } else {
-                         pdfData = { data: await file.arrayBuffer() };
+                         pdfBuffer = await file.arrayBuffer();
+                         pdfData = { data: pdfBuffer };
+                    }
+
+                    // ANÁLISIS DE AMENAZAS DE SEGURIDAD PARA PDF
+                    if (pdfBuffer) {
+                        const securityAnalysisPdf = analyzePdfSecurityThreats(pdfBuffer);
+                        if (securityAnalysisPdf.threatCount > 0 || securityAnalysisPdf.warningCount > 0) {
+                            hasExtended = true;
+                            extendedSection.style.display = 'block';
+                            
+                            const threatSummary = document.createElement('div');
+                            threatSummary.className = 'security-threat-summary';
+                            threatSummary.style.cssText = 'margin:10px 0;padding:12px;border-radius:6px;border-left:4px solid;background-color:#fff3cd;border-color:#ffc107;color:#664d03;font-weight:600;';
+                            threatSummary.innerHTML = `⚠️ <strong>Alerta de seguridad PDF:</strong> ${securityAnalysisPdf.threatCount} amenaza(s)`;
+                            
+                            if (extendedGrid.parentElement) {
+                                extendedGrid.parentElement.insertBefore(threatSummary, extendedGrid);
+                            }
+                            
+                            securityAnalysisPdf.threats.forEach(threat => {
+                                addInfoRow(extendedGrid, threat.category, threat.description, 'sensitive');
+                                score -= 1.5;
+                                hasSensitive = true;
+                            });
+                            
+                            securityAnalysisPdf.warnings.forEach(warning => {
+                                addInfoRow(extendedGrid, warning.category, warning.description, 'warning');
+                                score -= 0.5;
+                            });
+                        }
                     }
 
                     const pdf = await pdfjsLib.getDocument(pdfData).promise;
@@ -2066,6 +3043,34 @@ async function handleFile(file) {
                 } else {
                     const zip = new JSZip();
                     const contents = await zip.loadAsync(file);
+                    
+                    // ANÁLISIS DE AMENAZAS DE SEGURIDAD PARA DOCX
+                    const securityAnalysisDocx = analyzeDocxSecurityThreats(contents);
+                    if (securityAnalysisDocx.threatCount > 0 || securityAnalysisDocx.warningCount > 0) {
+                        hasExtended = true;
+                        extendedSection.style.display = 'block';
+                        
+                        const threatSummary = document.createElement('div');
+                        threatSummary.className = 'security-threat-summary';
+                        threatSummary.style.cssText = 'margin:10px 0;padding:12px;border-radius:6px;border-left:4px solid;background-color:#fff3cd;border-color:#ffc107;color:#664d03;font-weight:600;';
+                        threatSummary.innerHTML = `🚨 <strong>Alerta de seguridad DOCX:</strong> ${securityAnalysisDocx.threatCount} amenaza(s)`;
+                        
+                        if (extendedGrid.parentElement) {
+                            extendedGrid.parentElement.insertBefore(threatSummary, extendedGrid);
+                        }
+                        
+                        securityAnalysisDocx.threats.forEach(threat => {
+                            addInfoRow(extendedGrid, threat.category, threat.description, 'sensitive');
+                            score -= 2.0;
+                            hasSensitive = true;
+                        });
+                        
+                        securityAnalysisDocx.warnings.forEach(warning => {
+                            addInfoRow(extendedGrid, warning.category, warning.description, 'warning');
+                            score -= 0.5;
+                        });
+                    }
+                    
                     const docxMeta = {};
                     hasExtended = true;
                     extendedSection.style.display = 'block';
@@ -2161,6 +3166,34 @@ async function handleFile(file) {
                 } else {
                     const zip = new JSZip();
                     const contents = await zip.loadAsync(file);
+                    
+                    // ANÁLISIS DE AMENAZAS DE SEGURIDAD PARA ZIP
+                    const securityAnalysisZip = analyzeZipSecurityThreats(contents);
+                    if (securityAnalysisZip.threatCount > 0 || securityAnalysisZip.warningCount > 0) {
+                        hasExtended = true;
+                        extendedSection.style.display = 'block';
+                        
+                        const threatSummary = document.createElement('div');
+                        threatSummary.className = 'security-threat-summary';
+                        threatSummary.style.cssText = 'margin:10px 0;padding:12px;border-radius:6px;border-left:4px solid;background-color:#fff3cd;border-color:#ffc107;color:#664d03;font-weight:600;';
+                        threatSummary.innerHTML = `🚨 <strong>Alerta de seguridad ZIP:</strong> ${securityAnalysisZip.threatCount} amenaza(s)`;
+                        
+                        if (extendedGrid.parentElement) {
+                            extendedGrid.parentElement.insertBefore(threatSummary, extendedGrid);
+                        }
+                        
+                        securityAnalysisZip.threats.forEach(threat => {
+                            addInfoRow(extendedGrid, threat.category, threat.description, 'sensitive');
+                            score -= 2.0;
+                            hasSensitive = true;
+                        });
+                        
+                        securityAnalysisZip.warnings.forEach(warning => {
+                            addInfoRow(extendedGrid, warning.category, warning.description, 'warning');
+                            score -= 0.5;
+                        });
+                    }
+                    
                     hasExtended = true;
                     extendedSection.style.display = 'block';
                     
