@@ -1,7 +1,7 @@
 {
   "name": "Privacy Inspector",
   "short_name": "PrivacyInsp",
-  "description": "Analiza metadatos y contenido sensible de forma local, rápida y segura.",
+  "description": "Analiza metadatos y contenido sensible.",
   "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#ffffff",

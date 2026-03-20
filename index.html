@@ -7,17 +7,12 @@
     <link rel="manifest" href="manifest.json">
     <meta http-equiv="Permissions-Policy" content="display-capture=()">
     <meta name="description" content="Privacy Inspector: Analiza metadatos y contenido sensible de forma local, rápida y segura en tus archivos (fotos, videos, documentos).">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests;">
     <title>Privacy Inspector</title>
     <link rel="preload" href="fonts/fonts.css" as="style">
     <link rel="stylesheet" href="fonts/fonts.css">
     <link rel="preload" href="style.css" as="style">
     <link rel="stylesheet" href="style.css">
-    <script>
-        const savedTheme = localStorage.getItem('theme') || 'light';
-        document.documentElement.setAttribute('data-theme', savedTheme);
-    </script>
-    
     <!-- Local libraries deferred for performance -->
     <script src="lib/exif-reader.min.js" defer></script>
     <script src="lib/piexif.js" defer></script>
@@ -25,15 +20,6 @@
     <script src="lib/jszip.min.js" defer></script>
     <script src="lib/crypto-js.min.js" defer></script>
     <script src="app.js" defer></script>
-    <script>
-        if ('serviceWorker' in navigator) {
-            window.addEventListener('load', () => {
-                navigator.serviceWorker.register('./sw.js').catch(err => {
-                    console.log('Error asignando ServiceWorker:', err);
-                });
-            });
-        }
-    </script>
 </head>
 <body>
     <div id="screenLockOverlay" class="screen-lock-overlay" aria-live="assertive" role="status" aria-hidden="true" style="display: none;">
@@ -59,14 +45,18 @@
         <main class="inspector-card" id="mainCard">
             <!-- Upload Area -->
             <div class="upload-zone" id="dropZone">
-                <input type="file" id="fileInput" aria-label="Seleccionar archivo para inspeccionar" title="Selecciona un archivo">
+                <input type="file" id="fileInput" aria-label="Seleccionar archivo para inspeccionar" title="Selecciona uno o varios archivos" multiple accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.txt,.md,.json,.xml,.csv,.log,.zip" capture="environment">
                 <div class="upload-content">
                     <div class="upload-icon-wrapper">
                         <span class="material-symbols-rounded upload-icon-main">description</span>
                         <span class="material-symbols-rounded upload-icon-shield">shield</span>
                     </div>
-                    <h2 class="upload-title">Suelta un archivo para inspeccionarlo</h2>
-                    <p class="upload-subtitle">o pulsa aquí para seleccionarlo</p>
+                    <h2 class="upload-title">Suelta uno o varios archivos para inspeccionarlos</h2>
+                    <p class="upload-subtitle">También puedes capturar desde cámara o seleccionar un lote</p>
+                </div>
+                <div class="upload-batch-hint" id="uploadBatchHint">
+                    <span class="material-symbols-rounded">layers</span>
+                    <span id="batchQueueBadge">Sin lote en cola</span>
                 </div>
             </div>
 
@@ -102,6 +92,23 @@
                             <span class="status-text">Analyzing...</span>
                         </div>
                         <div class="action-wrapper">
+                            <div class="toolbelt-row">
+                                <label class="field-label" for="cleaningProfile">Perfil de limpieza</label>
+                                <select id="cleaningProfile" class="control-select">
+                                    <option value="complete">Completo</option>
+                                    <option value="smart">Privado inteligente</option>
+                                    <option value="basic">Básico</option>
+                                    <option value="preserve-author">Conservar autoría</option>
+                                    <option value="selective">Selectivo manual</option>
+                                </select>
+                            </div>
+                            <div class="toolbelt-row toolbelt-row-inline">
+                                <label class="switch-chip" for="educationModeToggle">
+                                    <input type="checkbox" id="educationModeToggle">
+                                    <span class="switch-chip-label">Modo educativo</span>
+                                </label>
+                                <span class="toolbelt-helper" id="profileHint">El perfil completo elimina toda la metadata compatible.</span>
+                            </div>
                             <button id="btnClean" class="btn-primary">
                                 <span class="material-symbols-rounded">cleaning_services</span>
                                 Limpiar metadatos
@@ -127,6 +134,33 @@
                         <input type="search" id="metadataSearch" placeholder="Buscar campos, valores o hallazgos" class="search-input">
                         <span id="searchResults" class="search-results-count"></span>
                     </div>
+                    <div class="search-filters" id="advancedSearchFilters">
+                        <select id="searchScopeFilter" class="control-select control-select-compact" aria-label="Filtrar por bloque">
+                            <option value="all">Todo</option>
+                            <option value="identityGrid">Identidad</option>
+                            <option value="structureGrid">Estructura</option>
+                            <option value="contentGrid">Contenido sensible</option>
+                            <option value="geoGrid">Geolocalización</option>
+                            <option value="exifGrid">EXIF</option>
+                            <option value="extendedGrid">Extendida</option>
+                        </select>
+                        <select id="severityFilter" class="control-select control-select-compact" aria-label="Filtrar por riesgo">
+                            <option value="all">Riesgo: todos</option>
+                            <option value="critical">Crítico</option>
+                            <option value="high">Alto</option>
+                            <option value="medium">Medio</option>
+                            <option value="low">Bajo</option>
+                        </select>
+                        <select id="queryMode" class="control-select control-select-compact" aria-label="Modo de búsqueda">
+                            <option value="contains">Coincidencia parcial</option>
+                            <option value="all">Todas las palabras</option>
+                            <option value="exact">Coincidencia exacta</option>
+                        </select>
+                        <label class="switch-chip switch-chip-compact" for="onlySensitiveToggle">
+                            <input type="checkbox" id="onlySensitiveToggle">
+                            <span class="switch-chip-label">Solo sensible</span>
+                        </label>
+                    </div>
                 </div>
 
                 <!-- Sections Container -->
@@ -150,6 +184,18 @@
                             <span class="material-symbols-rounded expand-icon">expand_more</span>
                         </summary>
                         <div class="section-content data-grid" id="structureGrid"></div>
+                    </details>
+
+                    <details class="inspector-section" id="riskSection" style="display: none;" open>
+                        <summary class="section-header">
+                            <span class="material-symbols-rounded">shield_with_heart</span>
+                            Matriz de Riesgo y Hallazgos
+                            <span class="material-symbols-rounded expand-icon">expand_more</span>
+                        </summary>
+                        <div class="section-content">
+                            <div class="risk-summary-grid" id="riskSummaryGrid"></div>
+                            <div class="risk-top-issues" id="riskTopIssues"></div>
+                        </div>
                     </details>
 
                     <!-- Section: Análisis de Contenido -->
@@ -275,6 +321,42 @@
                                 Exportar informe
                             </button>
                         </div>
+                    </div>
+                </div>
+
+                <div class="batch-section" id="batchSection" style="display: none;">
+                    <div class="batch-header">
+                        <div>
+                            <h4>Centro de análisis por lotes</h4>
+                            <p id="batchStatusText">Todavía no hay análisis acumulados en esta sesión.</p>
+                        </div>
+                        <div class="batch-actions">
+                            <button id="btnExportBatch" class="btn-primary" type="button">
+                                <span class="material-symbols-rounded">ios_share</span>
+                                Exportar lote
+                            </button>
+                            <button id="btnClearBatch" class="btn-primary" type="button">
+                                <span class="material-symbols-rounded">delete_sweep</span>
+                                Limpiar historial
+                            </button>
+                        </div>
+                    </div>
+                    <div class="batch-summary-grid" id="batchSummaryGrid"></div>
+                    <div class="batch-table-wrapper">
+                        <table class="batch-table">
+                            <thead>
+                                <tr>
+                                    <th>Archivo</th>
+                                    <th>Tipo</th>
+                                    <th>Índice</th>
+                                    <th>Riesgo</th>
+                                    <th>Hallazgos</th>
+                                    <th>Hora</th>
+                                </tr>
+                            </thead>
+                            <tbody id="batchHistoryBody"></tbody>
+                        </table>
+                        <div class="batch-empty-state" id="batchEmptyState">El lote se rellenará a medida que analices archivos o selecciones varios a la vez.</div>
                     </div>
                 </div>
 

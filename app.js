@@ -1,14 +1,49 @@
+const STORAGE_KEYS = {
+    theme: 'privacyInspector.theme',
+    batchHistory: 'privacyInspector.batchHistory'
+};
+const SAFE_THEMES = new Set(['light', 'dark']);
+
+function safeStorageGet(storage, key) {
+    try {
+        return storage.getItem(key);
+    } catch {
+        return null;
+    }
+}
+
+function safeStorageSet(storage, key, value) {
+    try {
+        storage.setItem(key, value);
+    } catch {
+        return false;
+    }
+    return true;
+}
+
+function getSavedTheme() {
+    const savedTheme = safeStorageGet(localStorage, STORAGE_KEYS.theme);
+    return SAFE_THEMES.has(savedTheme) ? savedTheme : 'light';
+}
+
 const themeBtn = document.getElementById('themeBtn');
 const themeIcon = document.getElementById('themeIcon');
 const html = document.documentElement;
 
+html.setAttribute('data-theme', getSavedTheme());
 updateThemeIcon(html.getAttribute('data-theme') || 'light');
+
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch(() => {});
+    });
+}
 
 themeBtn.addEventListener('click', () => {
     const currentTheme = html.getAttribute('data-theme');
     const newTheme = currentTheme === 'light' ? 'dark' : 'light';
     html.setAttribute('data-theme', newTheme);
-    localStorage.setItem('theme', newTheme);
+    safeStorageSet(localStorage, STORAGE_KEYS.theme, newTheme);
     updateThemeIcon(newTheme);
 });
 
@@ -69,6 +104,10 @@ const noMetadataMsg = document.getElementById('noMetadataMsg');
 const searchContainer = document.getElementById('searchContainer');
 const metadataSearch = document.getElementById('metadataSearch');
 const searchResults = document.getElementById('searchResults');
+const searchScopeFilter = document.getElementById('searchScopeFilter');
+const severityFilter = document.getElementById('severityFilter');
+const queryModeSelect = document.getElementById('queryMode');
+const onlySensitiveToggle = document.getElementById('onlySensitiveToggle');
 
 const resultSection = document.getElementById('resultSection');
 const resultStats = document.getElementById('resultStats');
@@ -86,11 +125,30 @@ const appContainer = document.querySelector('.app-container');
 const previewStage = document.getElementById('previewStage');
 const fileCategoryChip = document.getElementById('fileCategoryChip');
 const fileMimeChip = document.getElementById('fileMimeChip');
+const cleaningProfile = document.getElementById('cleaningProfile');
+const educationModeToggle = document.getElementById('educationModeToggle');
+const profileHint = document.getElementById('profileHint');
+const riskSection = document.getElementById('riskSection');
+const riskSummaryGrid = document.getElementById('riskSummaryGrid');
+const riskTopIssues = document.getElementById('riskTopIssues');
+const batchSection = document.getElementById('batchSection');
+const batchQueueBadge = document.getElementById('batchQueueBadge');
+const batchStatusText = document.getElementById('batchStatusText');
+const batchSummaryGrid = document.getElementById('batchSummaryGrid');
+const batchHistoryBody = document.getElementById('batchHistoryBody');
+const batchEmptyState = document.getElementById('batchEmptyState');
+const btnClearBatch = document.getElementById('btnClearBatch');
+const btnExportBatch = document.getElementById('btnExportBatch');
 
 let isScreenLocked = false;
 let unlockTimer = null;
 let previewBlobUrl = null;
 let previousTitle = document.title;
+let educationModeEnabled = false;
+let batchQueue = [];
+let isBatchProcessing = false;
+let analysisHistory = [];
+let lastAnalysisSummary = null;
 
 const CODE_EXTENSIONS = new Set(['txt', 'md', 'json', 'xml', 'csv', 'log', 'html', 'htm', 'css', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'java', 'kt', 'cs', 'cpp', 'c', 'h', 'hpp', 'py', 'rb', 'php', 'go', 'rs', 'swift', 'sql', 'sh', 'bat', 'ps1', 'toml', 'ini', 'conf', 'cfg', 'env', 'dockerfile']);
 const DOCUMENT_EXTENSIONS = new Set(['pdf', 'doc', 'docx', 'rtf', 'odt', 'xls', 'xlsx', 'ods', 'ppt', 'pptx', 'odp']);
@@ -101,6 +159,60 @@ const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 's
 const ISO_BMFF_EXTENSIONS = new Set(['mp4', 'm4v', 'm4a', 'mov']);
 const MP4_CONTAINER_BOXES = new Set(['moov', 'trak', 'mdia', 'minf', 'stbl', 'dinf', 'edts', 'udta', 'ilst', 'meta', 'moof', 'traf', 'mfra', 'skip']);
 const MP4_REMOVABLE_BOXES = new Set(['udta', 'uuid', 'ilst', 'xmp ']);
+const BATCH_HISTORY_LIMIT = 25;
+
+const CLEANING_PROFILES = {
+    complete: {
+        label: 'Completo',
+        hint: 'Elimina toda la metadata compatible cuando el formato lo permite.',
+        targets: ['EXIF', 'GPS', 'XMP', 'IPTC', 'ICC'],
+        useFullClean: true
+    },
+    smart: {
+        label: 'Privado inteligente',
+        hint: 'Prioriza ubicación, identidad del dispositivo, autores y software de edición.',
+        targets: ['GPS', 'Serial', 'Author', 'Creator', 'Software', 'Model', 'Make', 'Owner', 'Profile', 'Device']
+    },
+    basic: {
+        label: 'Básico',
+        hint: 'Quita geolocalización y rastros comunes de captura sin tocar todo el archivo.',
+        targets: ['GPS', 'Latitude', 'Longitude', 'Altitude', 'Location']
+    },
+    'preserve-author': {
+        label: 'Conservar autoría',
+        hint: 'Reduce trazas técnicas y GPS, pero intenta conservar datos editoriales de autor.',
+        targets: ['GPS', 'Latitude', 'Longitude', 'Altitude', 'Location', 'Serial', 'Software', 'Model', 'Make']
+    },
+    selective: {
+        label: 'Selectivo manual',
+        hint: 'Mantén el control manual marcando exactamente los campos a eliminar.',
+        targets: []
+    }
+};
+
+const EDUCATION_HINTS = {
+    gps: 'La geolocalización puede revelar dónde vives, trabajas o qué ruta seguiste.',
+    location: 'Una ubicación precisa suele ser suficiente para correlacionar hábitos o direcciones.',
+    latitude: 'Las coordenadas exactas permiten reconstruir el punto de captura.',
+    longitude: 'Combinada con latitud, la longitud ubica el archivo en un mapa real.',
+    altitude: 'La altitud ayuda a perfilar el lugar exacto y el contexto del archivo.',
+    exif: 'EXIF describe cómo y con qué dispositivo se generó el archivo.',
+    software: 'El software usado revela editor, versión o flujo de trabajo.',
+    model: 'El modelo del dispositivo ayuda a identificar el equipo de origen.',
+    make: 'La marca del hardware permite perfilar fabricante y ecosistema.',
+    serial: 'Los números de serie son identificadores persistentes del dispositivo.',
+    author: 'Autoría y creador pueden exponer identidad personal o corporativa.',
+    creator: 'El campo creador suele viajar con el archivo aunque se comparta externamente.',
+    phone: 'Un teléfono puede vincular el archivo con una persona concreta.',
+    email: 'Un correo expone identidad y canal directo de contacto.',
+    creditcard: 'Números de tarjeta son datos críticos y deben eliminarse o rotarse.',
+    imei: 'IMEI identifica de forma única un dispositivo móvil.',
+    imsi: 'IMSI identifica la suscripción móvil y es altamente sensible.',
+    ssn: 'Identificadores nacionales son datos personales de alta sensibilidad.',
+    bitcoin: 'Una dirección de cartera puede vincular actividad financiera.',
+    ethereum: 'Una dirección blockchain permite correlacionar operaciones públicas.',
+    hash: 'Los hashes permiten verificar integridad, no son metadatos sensibles por sí solos.'
+};
 
 function inferMimeType(extLower = '') {
     const ext = String(extLower || '').toLowerCase();
@@ -214,6 +326,380 @@ function formatFindingsSummary(values) {
     return `${count} valores únicos detectados`;
 }
 
+function safeJsonParse(value, fallback) {
+    if (!value) return fallback;
+    try {
+        return JSON.parse(value);
+    } catch {
+        return fallback;
+    }
+}
+
+function readBatchHistory() {
+    const parsed = safeJsonParse(safeStorageGet(sessionStorage, STORAGE_KEYS.batchHistory), []);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.slice(0, BATCH_HISTORY_LIMIT);
+}
+
+function writeBatchHistory() {
+    safeStorageSet(sessionStorage, STORAGE_KEYS.batchHistory, JSON.stringify(analysisHistory.slice(0, BATCH_HISTORY_LIMIT)));
+}
+
+function getEducationHint(label = '') {
+    const normalized = String(label || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const key = Object.keys(EDUCATION_HINTS).find(entry => normalized.includes(entry));
+    return key ? EDUCATION_HINTS[key] : '';
+}
+
+function normalizeNullLikeValue(value = '') {
+    const raw = String(value ?? '');
+    const compact = raw.replace(/[\u0000\s]/g, '');
+    if (!compact) return 'No definido (normal en perfil genérico)';
+    return raw;
+}
+
+function isBenignIccField(label = '', value = '') {
+    const normalizedLabel = String(label || '').toLowerCase();
+    const normalizedValue = normalizeNullLikeValue(value).toLowerCase();
+
+    const benignKeyPatterns = [
+        'preferred cmm type',
+        'profile version',
+        'profile/device class',
+        'color space',
+        'connection space',
+        'icc profile date',
+        'icc signature',
+        'primary platform',
+        'device manufacturer',
+        'device model number',
+        'rendering intent',
+        'profile creator',
+        'icc description',
+        'icc copyright'
+    ];
+
+    const benignValuePatterns = [
+        /^no definido \(normal en perfil genérico\)$/,
+        /^srgb$/,
+        /^rgb$/,
+        /^rgb $/,
+        /^xyz$/,
+        /^xyz $/,
+        /^acsp$/,
+        /^mntr$/,
+        /^display device profile$/,
+        /^relative colorimetric$/,
+        /^google inc\. 2016$/,
+        /^4\.[0-9.]+$/,
+        /^201[0-9]-[0-9]{2}-[0-9]{2}t/i
+    ];
+
+    return benignKeyPatterns.some(pattern => normalizedLabel.includes(pattern)) && benignValuePatterns.some(pattern => pattern.test(normalizedValue));
+}
+
+function isIccEntryLikelySafe(label = '', value = '') {
+    const normalizedLabel = String(label || '').toLowerCase();
+    const normalizedValue = normalizeNullLikeValue(value);
+    if (!normalizedLabel.includes('icc')) return false;
+    if (hasSuspiciousScriptPayload(normalizedValue)) return false;
+    return isBenignIccField(label, normalizedValue) || normalizedValue === 'No definido (normal en perfil genérico)';
+}
+
+function getIccProfileSummary(iccTags = {}) {
+    const description = iccTags['ICC Description']?.description || iccTags['ICC Description']?.value || '';
+    const colorSpace = iccTags['Color Space']?.description || iccTags['Color Space']?.value || '';
+    const deviceClass = iccTags['Profile/Device class']?.description || iccTags['Profile/Device class']?.value || '';
+
+    if (!description && !colorSpace && !deviceClass) return '';
+    const parts = [];
+    if (description) parts.push(String(description).trim());
+    if (colorSpace) parts.push(String(colorSpace).trim());
+    if (deviceClass) parts.push(String(deviceClass).trim());
+    return parts.join(' · ');
+}
+
+function inferRiskLevel(label = '', value = '', valueClass = '', containerId = '') {
+    const haystack = `${label} ${value} ${containerId}`.toLowerCase();
+    if (isIccEntryLikelySafe(label, value)) {
+        return 'low';
+    }
+    if (containerId === 'geoGrid' || /creditcard|imei|imsi|ssn|passport|gps|latitude|longitude|path traversal|macro|javascript|script|executable|payload/.test(haystack)) {
+        return 'critical';
+    }
+    if (valueClass.includes('sensitive') || /email|phone|author|creator|serial|wallet|bitcoin|ethereum|url|ipv4|mac address/.test(haystack)) {
+        return 'high';
+    }
+    if (valueClass.includes('warning') || /software|model|make|device|metadata|xmp|iptc|icc|pdf|docx|zip|warning/.test(haystack)) {
+        return 'medium';
+    }
+    return 'low';
+}
+
+function getRiskLabel(level) {
+    switch (level) {
+        case 'critical': return 'Crítico';
+        case 'high': return 'Alto';
+        case 'medium': return 'Medio';
+        default: return 'Bajo';
+    }
+}
+
+function getRiskIcon(level) {
+    switch (level) {
+        case 'critical': return 'gpp_bad';
+        case 'high': return 'warning';
+        case 'medium': return 'report';
+        default: return 'info';
+    }
+}
+
+function clearElement(element) {
+    if (!element) return;
+    while (element.firstChild) element.removeChild(element.firstChild);
+}
+
+function appendTextWithHighlight(element, text, query) {
+    const source = String(text || '');
+    const normalizedQuery = String(query || '').trim();
+    clearElement(element);
+    if (!normalizedQuery) {
+        element.textContent = source;
+        return;
+    }
+
+    const lowerSource = source.toLowerCase();
+    const lowerQuery = normalizedQuery.toLowerCase();
+    let searchIndex = 0;
+    let matchIndex = lowerSource.indexOf(lowerQuery);
+
+    while (matchIndex !== -1) {
+        if (matchIndex > searchIndex) {
+            element.appendChild(document.createTextNode(source.slice(searchIndex, matchIndex)));
+        }
+        const mark = document.createElement('mark');
+        mark.textContent = source.slice(matchIndex, matchIndex + lowerQuery.length);
+        element.appendChild(mark);
+        searchIndex = matchIndex + lowerQuery.length;
+        matchIndex = lowerSource.indexOf(lowerQuery, searchIndex);
+    }
+
+    if (searchIndex < source.length) {
+        element.appendChild(document.createTextNode(source.slice(searchIndex)));
+    }
+}
+
+function buildStatItem(label, value, className = '', inlineStyle = '') {
+    const item = document.createElement('div');
+    item.className = 'stat-item';
+    if (inlineStyle) item.style.cssText = inlineStyle;
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'stat-label';
+    labelEl.textContent = label;
+
+    const valueEl = document.createElement('span');
+    valueEl.className = `stat-value${className ? ` ${className}` : ''}`;
+    valueEl.textContent = value;
+
+    item.appendChild(labelEl);
+    item.appendChild(valueEl);
+    return item;
+}
+
+function renderResultStats(items) {
+    clearElement(resultStats);
+    items.forEach(item => {
+        resultStats.appendChild(buildStatItem(item.label, item.value, item.className || '', item.style || ''));
+    });
+}
+
+function collectCheckedKeys() {
+    return Array.from(document.querySelectorAll('.remove-checkbox:checked')).map(cb => cb.dataset.key);
+}
+
+function applyCleaningProfileSelection(profileName) {
+    const profile = CLEANING_PROFILES[profileName] || CLEANING_PROFILES.complete;
+    profileHint.textContent = profile.hint;
+    const checkboxes = document.querySelectorAll('.remove-checkbox');
+    if (!checkboxes.length) return;
+    checkboxes.forEach(checkbox => {
+        const key = String(checkbox.dataset.key || '').toLowerCase();
+        const shouldCheck = profile.targets.some(target => key.includes(String(target).toLowerCase()));
+        checkbox.checked = profileName === 'complete' ? true : shouldCheck;
+    });
+}
+
+function summarizeRiskFromRows() {
+    const rows = document.querySelectorAll('#contentGrid .data-row, #geoGrid .data-row, #exifGrid .data-row, #extendedGrid .data-row');
+    const buckets = {
+        critical: [],
+        high: [],
+        medium: [],
+        low: []
+    };
+
+    rows.forEach(row => {
+        if (row.style.display === 'none') return;
+        const label = row.dataset.label || row.querySelector('.data-label')?.textContent || '';
+        const value = row.dataset.value || row.querySelector('.data-value')?.textContent || '';
+        const valueClass = row.dataset.valueClass || '';
+        const level = row.dataset.riskLevel || inferRiskLevel(label, value, valueClass, row.dataset.containerId || '');
+        buckets[level].push({ label, value, level });
+    });
+
+    return buckets;
+}
+
+function renderRiskPanel() {
+    const buckets = summarizeRiskFromRows();
+    const totals = Object.fromEntries(Object.entries(buckets).map(([level, entries]) => [level, entries.length]));
+    const totalIssues = Object.values(totals).reduce((sum, amount) => sum + amount, 0);
+
+    if (!totalIssues) {
+        riskSection.style.display = 'none';
+        clearElement(riskSummaryGrid);
+        clearElement(riskTopIssues);
+        return;
+    }
+
+    riskSection.style.display = 'block';
+    clearElement(riskSummaryGrid);
+    clearElement(riskTopIssues);
+
+    ['critical', 'high', 'medium', 'low'].forEach(level => {
+        const card = document.createElement('div');
+        card.className = `risk-card risk-card-${level}`;
+
+        const title = document.createElement('span');
+        title.className = 'risk-card-title';
+        title.textContent = getRiskLabel(level);
+
+        const value = document.createElement('span');
+        value.className = 'risk-card-value';
+        value.textContent = String(totals[level]);
+
+        const top = document.createElement('span');
+        top.className = 'risk-card-top';
+        top.textContent = buckets[level].slice(0, 2).map(entry => entry.label).join(' · ') || 'Sin hallazgos';
+
+        card.appendChild(title);
+        card.appendChild(value);
+        card.appendChild(top);
+        riskSummaryGrid.appendChild(card);
+    });
+
+    const topIssues = [...buckets.critical, ...buckets.high, ...buckets.medium].slice(0, 8);
+    topIssues.forEach(issue => {
+        const pill = document.createElement('span');
+        pill.className = `risk-issue-pill severity-pill-${issue.level}`;
+        pill.textContent = `${getRiskLabel(issue.level)} · ${issue.label}`;
+        riskTopIssues.appendChild(pill);
+    });
+}
+
+function getBatchRiskLevel(score) {
+    if (score < 4) return 'critical';
+    if (score < 6.5) return 'high';
+    if (score < 8.5) return 'medium';
+    return 'low';
+}
+
+function renderBatchSummary() {
+    batchSection.style.display = analysisHistory.length ? 'block' : 'none';
+    clearElement(batchSummaryGrid);
+    clearElement(batchHistoryBody);
+
+    if (!analysisHistory.length) {
+        batchEmptyState.style.display = 'block';
+        batchStatusText.textContent = 'Todavía no hay análisis acumulados en esta sesión.';
+        return;
+    }
+
+    batchEmptyState.style.display = 'none';
+    const averageScore = analysisHistory.reduce((sum, entry) => sum + entry.score, 0) / analysisHistory.length;
+    const criticalCount = analysisHistory.filter(entry => entry.riskLevel === 'critical').length;
+    const sensitiveCount = analysisHistory.reduce((sum, entry) => sum + entry.findings, 0);
+    const categories = new Set(analysisHistory.map(entry => entry.category)).size;
+    const summaryItems = [
+        { label: 'Archivos analizados', value: String(analysisHistory.length) },
+        { label: 'Índice medio', value: averageScore.toFixed(1) },
+        { label: 'Lotes críticos', value: String(criticalCount) },
+        { label: 'Hallazgos totales', value: String(sensitiveCount) },
+        { label: 'Categorías vistas', value: String(categories) }
+    ];
+
+    summaryItems.forEach(item => {
+        const card = document.createElement('div');
+        card.className = 'batch-stat-card';
+        const label = document.createElement('span');
+        label.className = 'batch-stat-label';
+        label.textContent = item.label;
+        const value = document.createElement('span');
+        value.className = 'batch-stat-value';
+        value.textContent = item.value;
+        card.appendChild(label);
+        card.appendChild(value);
+        batchSummaryGrid.appendChild(card);
+    });
+
+    analysisHistory.forEach(entry => {
+        const row = document.createElement('tr');
+        const cells = [
+            `<strong class="batch-file-name">${entry.name}</strong><div class="batch-subtext">${entry.sizeLabel}</div>`,
+            `${entry.category}`,
+            `${entry.score.toFixed(1)}`,
+            `${getRiskLabel(entry.riskLevel)}`,
+            `${entry.findings}`,
+            `${entry.timeLabel}`
+        ];
+
+        cells.forEach((value, index) => {
+            const cell = document.createElement('td');
+            if (index === 0) {
+                const name = document.createElement('div');
+                name.className = 'batch-file-name';
+                name.textContent = entry.name;
+                const meta = document.createElement('div');
+                meta.className = 'batch-subtext';
+                meta.textContent = entry.sizeLabel;
+                cell.appendChild(name);
+                cell.appendChild(meta);
+            } else if (index === 3) {
+                cell.className = `batch-risk-text batch-risk-${entry.riskLevel}`;
+                cell.textContent = getRiskLabel(entry.riskLevel);
+            } else {
+                cell.textContent = value;
+            }
+            row.appendChild(cell);
+        });
+        batchHistoryBody.appendChild(row);
+    });
+
+    batchStatusText.textContent = isBatchProcessing
+        ? `Procesando lote: ${batchQueue.length} archivo(s) pendientes.`
+        : `Historial activo de ${analysisHistory.length} análisis en esta sesión.`;
+}
+
+function addBatchEntry(summary) {
+    const exists = analysisHistory.find(entry => entry.name === summary.name && entry.timestamp === summary.timestamp);
+    if (exists) return;
+    analysisHistory.unshift(summary);
+    analysisHistory = analysisHistory.slice(0, BATCH_HISTORY_LIMIT);
+    writeBatchHistory();
+    renderBatchSummary();
+}
+
+function updateBatchQueueBadge() {
+    batchQueueBadge.textContent = batchQueue.length
+        ? `${batchQueue.length} archivo(s) en cola`
+        : 'Sin lote en cola';
+}
+
+function clearThreatSummaries() {
+    document.querySelectorAll('.security-threat-summary').forEach(node => node.remove());
+}
+
 function clearPreviewStage() {
     if (previewBlobUrl) {
         URL.revokeObjectURL(previewBlobUrl);
@@ -237,12 +723,27 @@ function clearPreviewStage() {
 function createPreviewFileCard(name, category, mimeType) {
     const card = document.createElement('div');
     card.className = 'preview-file-card';
-    card.innerHTML = `
-        <span class="material-symbols-rounded">${getPreviewIcon(category)}</span>
-        <span class="preview-file-type">${category}</span>
-        <strong class="preview-file-name">${name}</strong>
-        <span class="preview-file-meta">${mimeType || 'Formato no identificado'}</span>
-    `;
+
+    const icon = document.createElement('span');
+    icon.className = 'material-symbols-rounded';
+    icon.textContent = getPreviewIcon(category);
+
+    const type = document.createElement('span');
+    type.className = 'preview-file-type';
+    type.textContent = category;
+
+    const strong = document.createElement('strong');
+    strong.className = 'preview-file-name';
+    strong.textContent = name;
+
+    const meta = document.createElement('span');
+    meta.className = 'preview-file-meta';
+    meta.textContent = mimeType || 'Formato no identificado';
+
+    card.appendChild(icon);
+    card.appendChild(type);
+    card.appendChild(strong);
+    card.appendChild(meta);
     return card;
 }
 
@@ -356,6 +857,9 @@ async function renderFilePreview(source, options = {}) {
         frame.className = `preview-frame ${containerClass}`;
         frame.src = previewBlobUrl;
         frame.title = `Vista previa de ${name}`;
+        frame.sandbox = '';
+        frame.referrerPolicy = 'no-referrer';
+        frame.loading = 'lazy';
         previewStage.appendChild(frame);
         return;
     }
@@ -453,6 +957,66 @@ document.addEventListener('dragstart', e => e.preventDefault());
 
 enforceScreenLock();
 
+analysisHistory = readBatchHistory();
+renderBatchSummary();
+updateBatchQueueBadge();
+if (cleaningProfile && CLEANING_PROFILES[cleaningProfile.value]) {
+    profileHint.textContent = CLEANING_PROFILES[cleaningProfile.value].hint;
+}
+
+educationModeToggle?.addEventListener('change', () => {
+    educationModeEnabled = educationModeToggle.checked;
+    if (currentFile) {
+        handleFile(currentFile, { preserveBatch: true, source: 'education-toggle' });
+    }
+});
+
+cleaningProfile?.addEventListener('change', () => {
+    applyCleaningProfileSelection(cleaningProfile.value);
+});
+
+btnClearBatch?.addEventListener('click', () => {
+    analysisHistory = [];
+    writeBatchHistory();
+    renderBatchSummary();
+});
+
+btnExportBatch?.addEventListener('click', () => {
+    if (!analysisHistory.length) return;
+    const blob = new Blob([JSON.stringify({
+        tool: 'Privacy Inspector',
+        exportedAt: new Date().toISOString(),
+        batch: analysisHistory
+    }, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'privacy_inspector_batch_report.json';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+});
+
+async function processBatch(files) {
+    if (!files.length) return;
+    batchQueue = [...files];
+    isBatchProcessing = true;
+    updateBatchQueueBadge();
+    renderBatchSummary();
+
+    while (batchQueue.length) {
+        const nextFile = batchQueue.shift();
+        updateBatchQueueBadge();
+        renderBatchSummary();
+        await handleFile(nextFile, { source: 'batch' });
+    }
+
+    isBatchProcessing = false;
+    updateBatchQueueBadge();
+    renderBatchSummary();
+}
+
 let currentFile = null;
 let cleanBlobUrl = null;
 let originalSize = 0;
@@ -531,36 +1095,15 @@ async function applyState(state) {
     const cleanHashMD5 = await calculateMD5(state.blob);
     const cleanHashCRC32 = await calculateCRC32(state.blob);
     
-    resultStats.innerHTML = `
-        <div class="stat-item">
-            <span class="stat-label">Original Size</span>
-            <span class="stat-value strike">${formatBytes(originalSize)}</span>
-        </div>
-        <div class="stat-item">
-            <span class="stat-label">Clean Size</span>
-            <span class="stat-value new">${formatBytes(cleanSize)}</span>
-        </div>
-        <div class="stat-item">
-            <span class="stat-label">Saved</span>
-            <span class="stat-value">${formatBytes(originalSize - cleanSize)}</span>
-        </div>
-        <div class="stat-item" style="grid-column: 1 / -1; margin-top: 8px;">
-            <span class="stat-label">Clean CRC32</span>
-            <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHashCRC32}</span>
-        </div>
-        <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;">
-            <span class="stat-label">Clean MD5</span>
-            <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHashMD5}</span>
-        </div>
-        <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;">
-            <span class="stat-label">Clean SHA-256</span>
-            <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHash256}</span>
-        </div>
-        <div class="stat-item" style="grid-column: 1 / -1; margin-top: 4px;">
-            <span class="stat-label">Clean SHA-512</span>
-            <span class="stat-value hash-value" style="font-size: 0.75rem;">${cleanHash}</span>
-        </div>
-    `;
+    renderResultStats([
+        { label: 'Original Size', value: formatBytes(originalSize), className: 'strike' },
+        { label: 'Clean Size', value: formatBytes(cleanSize), className: 'new' },
+        { label: 'Saved', value: formatBytes(originalSize - cleanSize) },
+        { label: 'Clean CRC32', value: cleanHashCRC32, className: 'hash-value', style: 'grid-column: 1 / -1; margin-top: 8px;' },
+        { label: 'Clean MD5', value: cleanHashMD5, className: 'hash-value', style: 'grid-column: 1 / -1; margin-top: 4px;' },
+        { label: 'Clean SHA-256', value: cleanHash256, className: 'hash-value', style: 'grid-column: 1 / -1; margin-top: 4px;' },
+        { label: 'Clean SHA-512', value: cleanHash, className: 'hash-value', style: 'grid-column: 1 / -1; margin-top: 4px;' }
+    ]);
     
     showDiffs(state.removedKeys);
     updateUndoRedoButtons();
@@ -881,13 +1424,23 @@ dropZone.addEventListener('dragleave', (e) => {
 dropZone.addEventListener('drop', (e) => {
     e.preventDefault();
     dropZone.classList.remove('dragover');
-    const file = e.dataTransfer.files[0];
-    if (file) handleFile(file);
+    const files = Array.from(e.dataTransfer.files || []);
+    if (!files.length) return;
+    if (files.length > 1) {
+        processBatch(files);
+        return;
+    }
+    handleFile(files[0]);
 });
 
 fileInput.addEventListener('change', () => {
-    const file = fileInput.files[0];
-    if (file) handleFile(file);
+    const files = Array.from(fileInput.files || []);
+    if (!files.length) return;
+    if (files.length > 1) {
+        processBatch(files);
+        return;
+    }
+    handleFile(files[0]);
 });
 
 document.addEventListener('paste', (e) => {
@@ -899,7 +1452,7 @@ document.addEventListener('paste', (e) => {
             const file = item.getAsFile();
             if (file) {
                 e.preventDefault();
-                handleFile(file);
+                processBatch([file]);
                 break;
             }
         }
@@ -913,6 +1466,22 @@ function formatBytes(bytes, decimals = 2) {
     const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+}
+
+async function sniffFileSignature(file) {
+    const header = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+    const ascii = Array.from(header).map(byte => String.fromCharCode(byte)).join('');
+    const hex = Array.from(header).map(byte => byte.toString(16).padStart(2, '0')).join('');
+
+    if (hex.startsWith('ffd8ff')) return 'image/jpeg';
+    if (hex.startsWith('89504e470d0a1a0a')) return 'image/png';
+    if (ascii.startsWith('GIF8')) return 'image/gif';
+    if (ascii.startsWith('%PDF')) return 'application/pdf';
+    if (ascii.slice(4, 8) === 'ftyp') return 'video/mp4';
+    if (ascii.startsWith('PK')) return 'application/zip';
+    if (ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'WAVE') return 'audio/wav';
+    if (ascii.startsWith('ID3')) return 'audio/mpeg';
+    return '';
 }
 
 async function calculateSHA512(blob) {
@@ -1068,6 +1637,95 @@ function sanitizeMp4Text(value) {
         .replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
+}
+
+function extractReadableTextFromBytes(bytes, maxBytes = bytes.length, minRunLength = 8) {
+    const source = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+    const limit = Math.min(source.length, maxBytes);
+    const segments = [];
+    let current = '';
+
+    for (let index = 0; index < limit; index++) {
+        const value = source[index];
+        const isPrintable = (value >= 32 && value <= 126) || value === 9 || value === 10 || value === 13;
+        if (isPrintable) {
+            current += String.fromCharCode(value);
+            continue;
+        }
+        if (current.trim().length >= minRunLength) {
+            segments.push(sanitizeMp4Text(current));
+        }
+        current = '';
+    }
+
+    if (current.trim().length >= minRunLength) {
+        segments.push(sanitizeMp4Text(current));
+    }
+
+    return segments.filter(Boolean).join('\n');
+}
+
+function hasSuspiciousScriptPayload(text) {
+    const normalized = sanitizeMp4Text(text).toLowerCase();
+    if (!normalized || normalized.length < 8) return false;
+    const directExecutionPatterns = [
+        /javascript:/,
+        /<script\b/,
+        /powershell(?:\.exe)?/,
+        /cmd\.exe/,
+        /wscript(?:\.exe)?/,
+        /cscript(?:\.exe)?/,
+        /createobject\s*\(/,
+        /shell\.application/,
+        /mshta(?:\.exe)?/
+    ];
+    return directExecutionPatterns.some(pattern => pattern.test(normalized));
+}
+
+function looksLikePortableExecutable(uint8, offset) {
+    if (offset < 0 || offset + 64 >= uint8.length) return false;
+    if (uint8[offset] !== 0x4D || uint8[offset + 1] !== 0x5A) return false;
+    const view = new DataView(uint8.buffer, uint8.byteOffset, uint8.byteLength);
+    const peOffset = view.getUint32(offset + 0x3C, true);
+    if (!Number.isFinite(peOffset) || peOffset <= 0 || peOffset > 1024 * 1024) return false;
+    const signatureOffset = offset + peOffset;
+    if (signatureOffset + 4 > uint8.length) return false;
+    return uint8[signatureOffset] === 0x50 && uint8[signatureOffset + 1] === 0x45 && uint8[signatureOffset + 2] === 0x00 && uint8[signatureOffset + 3] === 0x00;
+}
+
+function looksLikeZipContainer(uint8, offset) {
+    if (offset < 0 || offset + 4 >= uint8.length) return false;
+    if (!(uint8[offset] === 0x50 && uint8[offset + 1] === 0x4B && uint8[offset + 2] === 0x03 && uint8[offset + 3] === 0x04)) {
+        return false;
+    }
+    const scanEnd = Math.min(uint8.length - 3, offset + 1024 * 1024);
+    for (let index = offset + 30; index < scanEnd; index++) {
+        if (uint8[index] === 0x50 && uint8[index + 1] === 0x4B && (uint8[index + 2] === 0x01 || uint8[index + 2] === 0x05 || uint8[index + 2] === 0x07)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function looksLikeElfBinary(uint8, offset) {
+    if (offset < 0 || offset + 16 >= uint8.length) return false;
+    return uint8[offset] === 0x7F && uint8[offset + 1] === 0x45 && uint8[offset + 2] === 0x4C && uint8[offset + 3] === 0x46 && (uint8[offset + 4] === 1 || uint8[offset + 4] === 2) && uint8[offset + 6] === 1;
+}
+
+function createThreatSummary(typeLabel, countText) {
+    const threatSummary = document.createElement('div');
+    threatSummary.className = 'security-threat-summary';
+
+    const icon = document.createElement('span');
+    icon.textContent = '⚠️ ';
+
+    const strong = document.createElement('strong');
+    strong.textContent = typeLabel;
+
+    threatSummary.appendChild(icon);
+    threatSummary.appendChild(strong);
+    threatSummary.appendChild(document.createTextNode(` ${countText}`));
+    return threatSummary;
 }
 
 function formatMp4Language(code) {
@@ -1428,6 +2086,8 @@ function analyzeVideoSecurityThreats(arrayBuffer, fileSize = 0) {
     const threats = [];
     const view = new DataView(arrayBuffer);
     const warnings = [];
+    const uint8 = new Uint8Array(arrayBuffer);
+    const readableText = extractReadableTextFromBytes(uint8, Math.min(1500000, uint8.length), 12);
     
     // 1. DETECCIÓN DE SCRIPTS INCRUSTADOS
     function detectEmbeddedScripts() {
@@ -1442,8 +2102,7 @@ function analyzeVideoSecurityThreats(arrayBuffer, fileSize = 0) {
             /shell\s*\(/gi
         ];
         
-        const uint8 = new Uint8Array(arrayBuffer);
-        const text = new TextDecoder('utf-8', {fatal: false}).decode(uint8.slice(0, Math.min(1000000, uint8.length)));
+        const text = readableText;
         
         for (const pattern of scriptPatterns) {
             if (pattern.test(text)) {
@@ -1461,8 +2120,7 @@ function analyzeVideoSecurityThreats(arrayBuffer, fileSize = 0) {
 
     // 2. DETECCIÓN DE URLs SOSPECHOSAS
     function detectSuspiciousUrls() {
-        const uint8 = new Uint8Array(arrayBuffer);
-        const text = new TextDecoder('utf-8', {fatal: false}).decode(uint8.slice(0, Math.min(2000000, uint8.length)));
+        const text = readableText;
         
         const urlPattern = /https?:\/\/[^\s\x00]+/gi;
         const ipPattern = /\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b/g;
@@ -1527,10 +2185,11 @@ function analyzeVideoSecurityThreats(arrayBuffer, fileSize = 0) {
             }
             
             // Detectar boxes desconocidas o anómalas
-            const unknownBoxes = boxSizes.filter(b => !MP4_CONTAINER_BOXES.has(b.type));
+            const allowedMetadataBoxes = new Set(['ftyp', 'mdat', 'free', 'skip', 'wide', 'uuid', 'udta', 'meta', 'ilst', '©nam', '©ART', 'aART', '©alb', '©day', '©too', '©cmt', 'desc', 'ldes', 'cprt', 'covr', 'tmpo', 'trkn', 'disk', 'gnre', 'keyw', 'data']);
+            const unknownBoxes = boxSizes.filter(b => !MP4_CONTAINER_BOXES.has(b.type) && !allowedMetadataBoxes.has(b.type) && /^[\x20-\x7E]{4}$/.test(b.type));
             if (unknownBoxes.length > 0) {
                 const totalUnknown = unknownBoxes.reduce((sum, b) => sum + b.size, 0);
-                if (totalUnknown > 50000) {
+                if (totalUnknown > 250000) {
                     threats.push({
                         level: 'ALTO',
                         category: 'Payload binario oculto',
@@ -1552,11 +2211,10 @@ function analyzeVideoSecurityThreats(arrayBuffer, fileSize = 0) {
 
     // 4. DETECCIÓN DE MÚLTIPLES BLOBS BASE64
     function detectMultipleBase64Blobs() {
-        const uint8 = new Uint8Array(arrayBuffer);
-        const text = new TextDecoder('utf-8', {fatal: false}).decode(uint8.slice(0, Math.min(5000000, uint8.length)));
+        const text = readableText;
         
         // Buscar cadenas base64 largas (>500 chars)
-        const base64Pattern = /[A-Za-z0-9+\/]{500,}={0,2}/g;
+        const base64Pattern = /(?:[A-Za-z0-9+\/]{4}){96,}(?:[A-Za-z0-9+\/]{2}==|[A-Za-z0-9+\/]{3}=)?/g;
         const matches = text.match(base64Pattern) || [];
         
         if (matches.length > 1) {
@@ -1760,9 +2418,9 @@ function analyzeImageSecurityThreats(arrayBuffer) {
             if (uint8[i] === 0xFF && uint8[i + 1] === 0xE1) {
                 const size = view.getUint16(i + 2);
                 const exifData = uint8.slice(i + 4, i + size + 2);
-                const exifText = new TextDecoder('utf-8', {fatal: false}).decode(exifData);
+                const exifText = extractReadableTextFromBytes(exifData, exifData.length, 10);
                 
-                if (/javascript:|eval\(|<script|exec\(|base64|cmd\.exe|powershell/gi.test(exifText)) {
+                if (hasSuspiciousScriptPayload(exifText)) {
                     threats.push({
                         level: 'CRÍTICO',
                         category: 'EXIF Injection',
@@ -1776,23 +2434,25 @@ function analyzeImageSecurityThreats(arrayBuffer) {
     
     // Detectar embedded ZIP o archivos ejecutables
     function detectEmbeddedFiles() {
-        const patterns = [
-            { sig: [0x50, 0x4B, 0x03, 0x04], name: 'ZIP/Office' },
-            { sig: [0x4D, 0x5A], name: 'Ejecutable PE' },
-            { sig: [0x7F, 0x45, 0x4C, 0x46], name: 'Ejecutable ELF' }
-        ];
-        
-        for (const pattern of patterns) {
-            for (let i = 0; i < uint8.length - pattern.sig.length; i++) {
-                if (uint8.slice(i, i + pattern.sig.length).every((val, idx) => val === pattern.sig[idx])) {
+        const minEmbeddedOffset = 4096;
+        for (let i = minEmbeddedOffset; i < uint8.length - 4; i++) {
+            const foundZip = looksLikeZipContainer(uint8, i);
+            const foundPe = looksLikePortableExecutable(uint8, i);
+            const foundElf = looksLikeElfBinary(uint8, i);
+
+            if (foundZip || foundPe || foundElf) {
+                const name = foundZip ? 'ZIP/Office' : foundPe ? 'Ejecutable PE' : 'Ejecutable ELF';
+                const sizeHint = uint8.length - i;
+                if (sizeHint < 1024) {
+                    continue;
+                }
                     threats.push({
                         level: 'CRÍTICO',
                         category: 'Archivo ejecutable embedded',
-                        description: `Se detectó un archivo ${pattern.name} dentro de la imagen`,
+                        description: `Se detectó una firma válida de ${name} incrustada dentro de la imagen`,
                         severity: 9.5
                     });
                     return;
-                }
             }
         }
     }
@@ -1803,9 +2463,10 @@ function analyzeImageSecurityThreats(arrayBuffer) {
             if (uint8[i] === 0x80 && uint8[i + 1] === 0x04) {
                 // IPTC marker
                 const data = uint8.slice(i, Math.min(i + 1000, uint8.length));
-                const text = new TextDecoder('utf-8', {fatal: false}).decode(data);
+                const text = extractReadableTextFromBytes(data, data.length, 6).toLowerCase();
                 
-                if (/malware|virus|trojan|botnet|c2|payload|shell/gi.test(text)) {
+                const suspiciousWords = text.match(/\b(?:malware|virus|trojan|botnet|c2|payload|shell|powershell|cmd\.exe)\b/gi) || [];
+                if (suspiciousWords.length >= 2 || (suspiciousWords.length >= 1 && hasSuspiciousScriptPayload(text))) {
                     warnings.push({
                         level: 'ADVERTENCIA',
                         category: 'Metadata sospechosa IPTC',
@@ -1842,7 +2503,7 @@ function analyzePdfSecurityThreats(pdfData) {
     
     // Detectar JavaScript en PDF
     function detectPdfJavaScript() {
-        if (/\/JS\s|\/OpenAction|\/AA\s|javascript:|eval\(/gi.test(text)) {
+        if (/\/JavaScript\b|\/JS\b|\/OpenAction\s*<<[^>]*\/S\s*\/JavaScript|\/AA\s*<<[^>]*\/S\s*\/JavaScript|javascript:/gi.test(text)) {
             threats.push({
                 level: 'CRÍTICO',
                 category: 'JavaScript en PDF',
@@ -2118,12 +2779,12 @@ function analyzeAudioSecurityThreats(arrayBuffer) {
     const threats = [];
     const warnings = [];
     const uint8 = new Uint8Array(arrayBuffer);
-    const text = new TextDecoder('utf-8', {fatal: false}).decode(uint8.slice(0, Math.min(500000, uint8.length)));
+    const text = extractReadableTextFromBytes(uint8, Math.min(500000, uint8.length), 10);
     
     // Detectar metadata maliciosa en tags ID3
     function detectId3Injection() {
         if (/^ID3/i.test(new TextDecoder('utf-8', {fatal: false}).decode(uint8.slice(0, 3)))) {
-            if (/javascript:|eval\(|<script|exec\(|powershell|cmd\.exe/gi.test(text)) {
+            if (hasSuspiciousScriptPayload(text)) {
                 threats.push({
                     level: 'CRÍTICO',
                     category: 'ID3 Tag Injection',
@@ -2152,23 +2813,15 @@ function analyzeAudioSecurityThreats(arrayBuffer) {
     
     // Detectar embedding de archivos
     function detectEmbeddedPayload() {
-        // Buscar patrones ZIP o ejecutables
-        const patterns = [
-            { sig: [0x50, 0x4B, 0x03, 0x04], name: 'ZIP' },
-            { sig: [0x4D, 0x5A], name: 'Ejecutable PE' }
-        ];
-        
-        for (const pattern of patterns) {
-            for (let i = 100; i < uint8.length - pattern.sig.length; i++) {
-                if (uint8.slice(i, i + pattern.sig.length).every((val, idx) => val === pattern.sig[idx])) {
+        for (let i = 2048; i < uint8.length - 4; i++) {
+            if (looksLikeZipContainer(uint8, i) || looksLikePortableExecutable(uint8, i)) {
                     warnings.push({
                         level: 'ADVERTENCIA',
                         category: 'Payload embebido detectado',
-                        description: `Se encontró un archivo ${pattern.name} dentro del audio`,
+                        description: 'Se encontró una firma binaria válida incrustada dentro del audio',
                         severity: 7
                     });
                     return;
-                }
             }
         }
     }
@@ -2310,14 +2963,42 @@ function stripMp4Metadata(arrayBuffer) {
 function addInfoRow(container, label, value, valueClass = '', isRemovable = false, tagKey = '') {
     const row = document.createElement('div');
     row.className = 'data-row';
+    row.dataset.label = String(label || '');
+    row.dataset.value = String(value || '');
+    row.dataset.valueClass = String(valueClass || '');
+    row.dataset.containerId = container.id || '';
+    row.dataset.riskLevel = inferRiskLevel(label, value, valueClass, container.id || '');
     
     const lbl = document.createElement('span');
     lbl.className = 'data-label';
     lbl.textContent = label;
+
+    const labelGroup = document.createElement('div');
+    labelGroup.className = 'data-label-group';
+    labelGroup.appendChild(lbl);
+
+    const riskBadge = document.createElement('span');
+    riskBadge.className = `row-risk-badge row-risk-badge-${row.dataset.riskLevel}`;
+    riskBadge.textContent = getRiskLabel(row.dataset.riskLevel);
+    labelGroup.appendChild(riskBadge);
     
     const val = document.createElement('span');
     val.className = `data-value ${valueClass}`;
     val.textContent = value;
+
+    const valueMeta = document.createElement('div');
+    valueMeta.className = 'data-meta';
+    valueMeta.appendChild(val);
+
+    if (educationModeEnabled) {
+        const hint = getEducationHint(label);
+        if (hint) {
+            const hintEl = document.createElement('span');
+            hintEl.className = 'education-hint';
+            hintEl.textContent = hint;
+            valueMeta.appendChild(hintEl);
+        }
+    }
     
     if (isRemovable) {
         const checkbox = document.createElement('input');
@@ -2331,32 +3012,54 @@ function addInfoRow(container, label, value, valueClass = '', isRemovable = fals
         labelWrapper.style.alignItems = 'center';
         labelWrapper.style.gap = '8px';
         labelWrapper.appendChild(checkbox);
-        labelWrapper.appendChild(lbl);
+        labelWrapper.appendChild(labelGroup);
         
         row.appendChild(labelWrapper);
     } else {
-        row.appendChild(lbl);
+        row.appendChild(labelGroup);
     }
     
-    row.appendChild(val);
+    row.appendChild(valueMeta);
     container.appendChild(row);
 }
 
 function setPrivacyStatus(type, icon, text) {
     privacyStatus.className = `status-indicator ${type}`;
-    privacyStatus.innerHTML = `
-        <span class="material-symbols-rounded status-icon">${icon}</span>
-        <span class="status-text">${text}</span>
-    `;
+    clearElement(privacyStatus);
+
+    const iconEl = document.createElement('span');
+    iconEl.className = 'material-symbols-rounded status-icon';
+    iconEl.textContent = icon;
+
+    const textEl = document.createElement('span');
+    textEl.className = 'status-text';
+    textEl.textContent = text;
+
+    privacyStatus.appendChild(iconEl);
+    privacyStatus.appendChild(textEl);
 }
 
 function escapeRegex(str) {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function matchesQuery(labelText, valueText, query, mode) {
+    const haystack = `${labelText} ${valueText}`.toLowerCase();
+    const normalized = query.toLowerCase().trim();
+    if (!normalized) return true;
+    if (mode === 'exact') return haystack.includes(normalized);
+    if (mode === 'all') {
+        return normalized.split(/\s+/).filter(Boolean).every(part => haystack.includes(part));
+    }
+    return haystack.includes(normalized);
+}
+
 function filterMetadata(query) {
     const q = query.toLowerCase().trim();
-    const escaped = q ? escapeRegex(q) : '';
+    const scope = searchScopeFilter?.value || 'all';
+    const severity = severityFilter?.value || 'all';
+    const mode = queryModeSelect?.value || 'contains';
+    const onlySensitive = Boolean(onlySensitiveToggle?.checked);
     let totalMatches = 0;
     
     const sections = [
@@ -2383,34 +3086,21 @@ function filterMetadata(query) {
             const labelEl = row.querySelector('.data-label');
             const valueEl = row.querySelector('.data-value');
             if (!labelEl || !valueEl) return;
+
+            appendTextWithHighlight(labelEl, row.dataset.label || labelEl.textContent, q);
+            appendTextWithHighlight(valueEl, row.dataset.value || valueEl.textContent, q);
             
-            labelEl.innerHTML = labelEl.textContent;
-            valueEl.innerHTML = valueEl.textContent;
-            
-            if (!q) {
-                row.style.display = 'flex';
-                return;
-            }
-            
-            const labelText = labelEl.textContent;
-            const valueText = valueEl.textContent;
-            const labelMatch = labelText.toLowerCase().includes(q);
-            const valueMatch = valueText.toLowerCase().includes(q);
-            
-            if (labelMatch || valueMatch) {
+            const labelText = row.dataset.label || labelEl.textContent;
+            const valueText = row.dataset.value || valueEl.textContent;
+            const scopeMatch = scope === 'all' || scope === grid.id;
+            const severityMatch = severity === 'all' || (row.dataset.riskLevel || 'low') === severity;
+            const sensitiveMatch = !onlySensitive || /sensitive|warning/.test(row.dataset.valueClass || '');
+            const queryMatch = matchesQuery(labelText, valueText, q, mode);
+
+            if (scopeMatch && severityMatch && sensitiveMatch && queryMatch) {
                 row.style.display = 'flex';
                 sectionMatches++;
                 totalMatches++;
-                
-                // Highlight matches
-                if (labelMatch) {
-                    const regex = new RegExp(`(${escaped})`, 'gi');
-                    labelEl.innerHTML = labelText.replace(regex, '<mark>$1</mark>');
-                }
-                if (valueMatch) {
-                    const regex = new RegExp(`(${escaped})`, 'gi');
-                    valueEl.innerHTML = valueText.replace(regex, '<mark>$1</mark>');
-                }
             } else {
                 row.style.display = 'none';
             }
@@ -2429,7 +3119,9 @@ function filterMetadata(query) {
         }
     });
     
-    if (q) {
+    const hasActiveFilters = scope !== 'all' || severity !== 'all' || onlySensitive || mode !== 'contains';
+
+    if (q || hasActiveFilters) {
         searchResults.textContent = `${totalMatches} coincidencia${totalMatches !== 1 ? 's' : ''}`;
     } else {
         searchResults.textContent = '';
@@ -2440,13 +3132,21 @@ metadataSearch.addEventListener('input', (e) => {
     filterMetadata(e.target.value);
 });
 
-async function handleFile(file) {
+[searchScopeFilter, severityFilter, queryModeSelect, onlySensitiveToggle].forEach(control => {
+    control?.addEventListener('input', () => filterMetadata(metadataSearch.value));
+    control?.addEventListener('change', () => filterMetadata(metadataSearch.value));
+});
+
+async function handleFile(file, options = {}) {
     try {
+        const { preserveBatch = false } = options;
         currentFile = file;
         originalSize = file.size;
         const extLower = (file.name.split('.').pop() || '').toLowerCase();
         const inferredMime = file.type || inferMimeType(extLower);
         const fileCategory = getFileCategory(file, extLower, inferredMime);
+        const signatureMime = await sniffFileSignature(file);
+        const hasSignatureMismatch = signatureMime && inferredMime && signatureMime !== inferredMime && !(signatureMime === 'application/zip' && ['docx', 'xlsx', 'pptx'].includes(extLower));
         
         if (cleanBlobUrl) URL.revokeObjectURL(cleanBlobUrl);
         cleanBlobUrl = null;
@@ -2486,10 +3186,12 @@ async function handleFile(file) {
         extendedSection.style.display = 'none';
         rawSection.style.display = 'none';
         contentSection.style.display = 'none';
+        riskSection.style.display = 'none';
         noMetadataMsg.style.display = 'none';
         searchContainer.style.display = 'block';
         metadataSearch.value = '';
         searchResults.textContent = '';
+        clearThreatSummaries();
         
         document.querySelectorAll('.select-all-cb').forEach(cb => cb.checked = false);
 
@@ -2517,6 +3219,9 @@ async function handleFile(file) {
         addInfoRow(identityGrid, 'Tamaño exacto', `${file.size} bytes`);
         addInfoRow(identityGrid, 'Tamaño legible', formatBytes(file.size));
         addInfoRow(identityGrid, 'Modificado', formatDate(file.lastModified));
+        if (hasSignatureMismatch) {
+            addInfoRow(identityGrid, 'Incongruencia detectada', `Cabecera binaria ${signatureMime} distinta de ${inferredMime}`, 'warning');
+        }
         
         originalHash = await calculateSHA512(file);
         const originalHash256 = await calculateSHA256(file);
@@ -2531,6 +3236,9 @@ async function handleFile(file) {
         structureGrid.innerHTML = '';
         addInfoRow(structureGrid, 'Formato', ext);
         addInfoRow(structureGrid, 'Visualización', fileCategory);
+        if (signatureMime) {
+            addInfoRow(structureGrid, 'Firma binaria', signatureMime);
+        }
         
         if (isImage) {
             const img = new Image();
@@ -2560,10 +3268,7 @@ async function handleFile(file) {
                         hasExtended = true;
                         extendedSection.style.display = 'block';
                         
-                        const threatSummary = document.createElement('div');
-                        threatSummary.className = 'security-threat-summary';
-                        threatSummary.style.cssText = 'margin:10px 0;padding:12px;border-radius:6px;border-left:4px solid;background-color:#fff3cd;border-color:#ffc107;color:#664d03;font-weight:600;';
-                        threatSummary.innerHTML = `⚠️ <strong>Alerta de seguridad audio:</strong> ${securityAnalysisAudio.threatCount} amenaza(s)`;
+                        const threatSummary = createThreatSummary('Alerta de seguridad audio:', `${securityAnalysisAudio.threatCount} amenaza(s)`);
                         
                         if (extendedGrid && extendedGrid.parentElement) {
                             extendedGrid.parentElement.insertBefore(threatSummary, extendedGrid);
@@ -2702,10 +3407,7 @@ async function handleFile(file) {
                     hasExtended = true;
                     extendedSection.style.display = 'block';
                     
-                    const threatSummary = document.createElement('div');
-                    threatSummary.className = 'security-threat-summary';
-                    threatSummary.style.cssText = 'margin:10px 0;padding:12px;border-radius:6px;border-left:4px solid;background-color:#fff3cd;border-color:#ffc107;color:#664d03;font-weight:600;';
-                    threatSummary.innerHTML = `⚠️ <strong>Alerta de seguridad:</strong> ${securityAnalysisImg.threatCount} amenaza(s) detectada(s)`;
+                    const threatSummary = createThreatSummary('Alerta de seguridad:', `${securityAnalysisImg.threatCount} amenaza(s) detectada(s)`);
                     
                     if (extendedGrid.parentElement) {
                         extendedGrid.parentElement.insertBefore(threatSummary, extendedGrid);
@@ -2798,14 +3500,26 @@ async function handleFile(file) {
                         if (tags[type] && Object.keys(tags[type]).length > 0) {
                             hasExtended = true;
                             extendedSection.style.display = 'block';
+                            if (type === 'icc') {
+                                const iccSummary = getIccProfileSummary(tags[type]);
+                                if (iccSummary) {
+                                    addInfoRow(structureGrid, 'Perfil ICC', `${iccSummary} · válido`, '', false, 'ICC:summary');
+                                }
+                            }
                             for (const [key, tag] of Object.entries(tags[type])) {
                                 const isBinary = tag.value instanceof Uint8Array || tag.value instanceof ArrayBuffer || (Array.isArray(tag.value) && tag.value.length > 30);
                                 let val = tag.description || (isBinary ? '[Binary Data]' : String(tag.value));
+                                if (type === 'icc') {
+                                    val = normalizeNullLikeValue(val);
+                                }
                                 if (val && val.length > 500) val = val.substring(0, 500) + '...';
                                 extractedTags[`${type.toUpperCase()}:${key}`] = val;
                                 totalTags++;
-                                analyzeSensitiveText(String(val || ''), key);
-                                addInfoRow(extendedGrid, `[${type.toUpperCase()}] ${key}`, val, '', true, `${type.toUpperCase()}:${key}`);
+                                if (type !== 'icc' || !isIccEntryLikelySafe(`[${type.toUpperCase()}] ${key}`, val)) {
+                                    analyzeSensitiveText(String(val || ''), key);
+                                }
+                                const valueClass = type === 'icc' && isIccEntryLikelySafe(`[${type.toUpperCase()}] ${key}`, val) ? '' : '';
+                                addInfoRow(extendedGrid, `[${type.toUpperCase()}] ${key}`, val, valueClass, true, `${type.toUpperCase()}:${key}`);
                             }
                         }
                     });
@@ -2840,12 +3554,8 @@ async function handleFile(file) {
                             extendedSection.style.display = 'block';
                             
                             // Mostrar resumen de amenazas
-                            const threatSummary = document.createElement('div');
-                            threatSummary.className = 'security-threat-summary';
-                            threatSummary.style.cssText = 'margin:10px 0;padding:12px;border-radius:6px;border-left:4px solid;background-color:#fff3cd;border-color:#ffc107;color:#664d03;font-weight:600;';
-                            
                             const riskIcon = securityAnalysis.summary.riskLevel === 'CRÍTICO' ? '🚨' : '⚠️';
-                            threatSummary.innerHTML = `${riskIcon} <strong>Alerta de seguridad:</strong> Se detectaron ${securityAnalysis.threatCount} amenaza(s) y ${securityAnalysis.warningCount} advertencia(s) en el video`;
+                            const threatSummary = createThreatSummary(`Alerta de seguridad ${riskIcon}`, `Se detectaron ${securityAnalysis.threatCount} amenaza(s) y ${securityAnalysis.warningCount} advertencia(s) en el video`);
                             
                             extendedGrid.parentElement.insertBefore(threatSummary, extendedGrid);
                             
@@ -2912,10 +3622,7 @@ async function handleFile(file) {
                                 hasExtended = true;
                                 extendedSection.style.display = 'block';
                                 
-                                const threatSummary = document.createElement('div');
-                                threatSummary.className = 'security-threat-summary';
-                                threatSummary.style.cssText = 'margin:10px 0;padding:12px;border-radius:6px;border-left:4px solid;background-color:#fff3cd;border-color:#ffc107;color:#664d03;font-weight:600;';
-                                threatSummary.innerHTML = `⚠️ <strong>Alerta de seguridad WebM:</strong> ${securityAnalysis.threatCount} amenaza(s) detectada(s)`;
+                                const threatSummary = createThreatSummary('Alerta de seguridad WebM:', `${securityAnalysis.threatCount} amenaza(s) detectada(s)`);
                                 extendedGrid.parentElement.insertBefore(threatSummary, extendedGrid);
                                 
                                 securityAnalysis.threats.forEach(threat => {
@@ -2942,10 +3649,7 @@ async function handleFile(file) {
                                 hasExtended = true;
                                 extendedSection.style.display = 'block';
                                 
-                                const threatSummary = document.createElement('div');
-                                threatSummary.className = 'security-threat-summary';
-                                threatSummary.style.cssText = 'margin:10px 0;padding:12px;border-radius:6px;border-left:4px solid;background-color:#fff3cd;border-color:#ffc107;color:#664d03;font-weight:600;';
-                                threatSummary.innerHTML = `⚠️ <strong>Alerta de seguridad MKV:</strong> ${securityAnalysis.threatCount} amenaza(s) detectada(s)`;
+                                const threatSummary = createThreatSummary('Alerta de seguridad MKV:', `${securityAnalysis.threatCount} amenaza(s) detectada(s)`);
                                 extendedGrid.parentElement.insertBefore(threatSummary, extendedGrid);
                                 
                                 securityAnalysis.threats.forEach(threat => {
@@ -2988,10 +3692,7 @@ async function handleFile(file) {
                             hasExtended = true;
                             extendedSection.style.display = 'block';
                             
-                            const threatSummary = document.createElement('div');
-                            threatSummary.className = 'security-threat-summary';
-                            threatSummary.style.cssText = 'margin:10px 0;padding:12px;border-radius:6px;border-left:4px solid;background-color:#fff3cd;border-color:#ffc107;color:#664d03;font-weight:600;';
-                            threatSummary.innerHTML = `⚠️ <strong>Alerta de seguridad PDF:</strong> ${securityAnalysisPdf.threatCount} amenaza(s)`;
+                            const threatSummary = createThreatSummary('Alerta de seguridad PDF:', `${securityAnalysisPdf.threatCount} amenaza(s)`);
                             
                             if (extendedGrid.parentElement) {
                                 extendedGrid.parentElement.insertBefore(threatSummary, extendedGrid);
@@ -3059,10 +3760,7 @@ async function handleFile(file) {
                         hasExtended = true;
                         extendedSection.style.display = 'block';
                         
-                        const threatSummary = document.createElement('div');
-                        threatSummary.className = 'security-threat-summary';
-                        threatSummary.style.cssText = 'margin:10px 0;padding:12px;border-radius:6px;border-left:4px solid;background-color:#fff3cd;border-color:#ffc107;color:#664d03;font-weight:600;';
-                        threatSummary.innerHTML = `🚨 <strong>Alerta de seguridad DOCX:</strong> ${securityAnalysisDocx.threatCount} amenaza(s)`;
+                        const threatSummary = createThreatSummary('Alerta de seguridad DOCX:', `${securityAnalysisDocx.threatCount} amenaza(s)`);
                         
                         if (extendedGrid.parentElement) {
                             extendedGrid.parentElement.insertBefore(threatSummary, extendedGrid);
@@ -3182,10 +3880,7 @@ async function handleFile(file) {
                         hasExtended = true;
                         extendedSection.style.display = 'block';
                         
-                        const threatSummary = document.createElement('div');
-                        threatSummary.className = 'security-threat-summary';
-                        threatSummary.style.cssText = 'margin:10px 0;padding:12px;border-radius:6px;border-left:4px solid;background-color:#fff3cd;border-color:#ffc107;color:#664d03;font-weight:600;';
-                        threatSummary.innerHTML = `🚨 <strong>Alerta de seguridad ZIP:</strong> ${securityAnalysisZip.threatCount} amenaza(s)`;
+                        const threatSummary = createThreatSummary('Alerta de seguridad ZIP:', `${securityAnalysisZip.threatCount} amenaza(s)`);
                         
                         if (extendedGrid.parentElement) {
                             extendedGrid.parentElement.insertBefore(threatSummary, extendedGrid);
@@ -3304,11 +3999,36 @@ async function handleFile(file) {
                 setPrivacyStatus('warning', 'info', 'Metadata detectada');
             }
         }
+
+        applyCleaningProfileSelection(cleaningProfile?.value || 'complete');
+        renderRiskPanel();
+
+        lastAnalysisSummary = {
+            name: file.name,
+            category: fileCategory,
+            score,
+            findings: sensitiveFindings.length + Object.keys(extractedTags).length,
+            riskLevel: getBatchRiskLevel(score),
+            size: file.size,
+            sizeLabel: formatBytes(file.size),
+            timestamp: new Date().toISOString(),
+            timeLabel: new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
+        };
+
+        if (!preserveBatch) {
+            addBatchEntry(lastAnalysisSummary);
+        }
         
     } catch (error) {
         console.error(error);
         noMetadataMsg.style.display = 'flex';
-        noMetadataMsg.innerHTML = `<span class="material-symbols-rounded">error</span> Error al analizar archivo`;
+        clearElement(noMetadataMsg);
+        const icon = document.createElement('span');
+        icon.className = 'material-symbols-rounded';
+        icon.textContent = 'error';
+        const text = document.createTextNode('Error al analizar archivo');
+        noMetadataMsg.appendChild(icon);
+        noMetadataMsg.appendChild(text);
         setPrivacyStatus('warning', 'error', 'Análisis fallido');
     }
 }
@@ -3330,16 +4050,22 @@ document.querySelectorAll('.select-all-cb').forEach(cb => {
 });
 
 function showDiffs(removedKeys) {
-    diffGrid.innerHTML = `
-        <div class="diff-row diff-header-row">
-            <span>Campo</span>
-            <span>Antes</span>
-            <span>Después</span>
-        </div>
-    `;
+    clearElement(diffGrid);
+
+    const header = document.createElement('div');
+    header.className = 'diff-row diff-header-row';
+    ['Campo', 'Antes', 'Después'].forEach(text => {
+        const span = document.createElement('span');
+        span.textContent = text;
+        header.appendChild(span);
+    });
+    diffGrid.appendChild(header);
     
     if (removedKeys.length === 0) {
-        diffGrid.innerHTML += `<div style="padding: 16px; text-align: center; color: var(--text-muted);">No se eliminaron metadatos específicos.</div>`;
+        const empty = document.createElement('div');
+        empty.style.cssText = 'padding: 16px; text-align: center; color: var(--text-muted);';
+        empty.textContent = 'No se eliminaron metadatos específicos.';
+        diffGrid.appendChild(empty);
         return;
     }
     
@@ -3371,6 +4097,19 @@ function showDiffs(removedKeys) {
 
 btnClean.addEventListener('click', async () => {
     if (!currentFile) return;
+
+    const activeProfile = cleaningProfile?.value || 'complete';
+    const currentExt = (currentFile.name.split('.').pop() || '').toLowerCase();
+    const currentMime = currentFile.type || inferMimeType(currentExt);
+    const profileWantsSelective = activeProfile !== 'complete';
+
+    if (profileWantsSelective && (currentMime === 'image/jpeg' || currentMime === 'image/jpg' || ['jpg', 'jpeg'].includes(currentExt))) {
+        if (activeProfile !== 'selective') {
+            applyCleaningProfileSelection(activeProfile);
+        }
+        btnSelectiveClean.click();
+        return;
+    }
     
     btnClean.style.display = 'none';
     if (typeof btnSelectiveClean !== 'undefined') btnSelectiveClean.style.display = 'none';
@@ -3384,8 +4123,6 @@ btnClean.addEventListener('click', async () => {
     }, 100);
     
     try {
-        const currentExt = (currentFile.name.split('.').pop() || '').toLowerCase();
-        const currentMime = currentFile.type || inferMimeType(currentExt);
         const isJpeg = currentFile.type === 'image/jpeg' || currentFile.type === 'image/jpg';
         const isIsoBmff = isIsoBmffMedia(currentExt, currentMime);
         

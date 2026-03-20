@@ -1,4 +1,4 @@
-const CACHE_NAME = 'privacy-inspector-v1';
+const CACHE_NAME = 'privacy-inspector-v2';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
@@ -16,12 +16,18 @@ const ASSETS_TO_CACHE = [
     './lib/crypto-js.min.js'
 ];
 
+function isCacheableRequest(request) {
+    if (!request || request.method !== 'GET') return false;
+    const url = new URL(request.url);
+    if (url.origin !== self.location.origin) return false;
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+    return ASSETS_TO_CACHE.includes(url.pathname === '/' ? './' : `.${url.pathname}`);
+}
+
 // Instalar el Service Worker y almacenar recursos en caché
 self.addEventListener('install', event => {
     event.waitUntil(
-        caches.open(CACHE_NAME).then(cache => {
-            return cache.addAll(ASSETS_TO_CACHE);
-        })
+        caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS_TO_CACHE))
     );
     self.skipWaiting();
 });
@@ -40,18 +46,21 @@ self.addEventListener('activate', event => {
 
 // Interceptar peticiones para servir desde caché (Estrategia Cache-First)
 self.addEventListener('fetch', event => {
+    if (!isCacheableRequest(event.request)) {
+        return;
+    }
+
     event.respondWith(
-        caches.match(event.request).then(response => {
-            return response || fetch(event.request).then(fetchResponse => {
-                return caches.open(CACHE_NAME).then(cache => {
-                    if (event.request.method === 'GET') {
-                        cache.put(event.request.url, fetchResponse.clone());
-                    }
-                    return fetchResponse;
-                });
-            });
-        }).catch(() => {
-            // Falla de red, y no está en caché (podrías servir un offline.html aquí)
-        })
+        fetch(event.request).then(fetchResponse => {
+            if (!fetchResponse || fetchResponse.status !== 200) {
+                return caches.match(event.request);
+            }
+
+            const responseClone = fetchResponse.clone();
+            event.waitUntil(
+                caches.open(CACHE_NAME).then(cache => cache.put(event.request, responseClone))
+            );
+            return fetchResponse;
+        }).catch(() => caches.match(event.request))
     );
 });
